@@ -2,15 +2,28 @@
 description: Update this repository's card deck against everything committed since it was generated
 ---
 
-Update the repo-cards deck for the repository in the current working directory, or for `$ARGUMENTS`
-if a repo name was given.
+Bring card decks back in line with what has been committed since they were written.
 
 **First load the `repo-cards` skill** (Skill tool, `repo-cards:repo-cards`) for the card bar, the
 card format and the anchoring rules.
 
-Start with `repo-cards drift --repo <name>`. It reports the commits since `last_update_sha`, the
-files changed, cards whose anchor changed, cards where the file moved but the anchored symbol did
-not, and changed files no card is anchored to.
+**Scope.** `$ARGUMENTS` names a repo, in which case update that one. With no argument, update the
+repo the working directory is in if it has a deck; if it does not, sweep every registered repo.
+
+**Sweeping.** Run `repo-cards drift` with no `--repo`. It prints one line per repo: commits behind,
+cards to verify, changed files no card covers, and the decks that do not exist yet. Then:
+
+* Report that table before doing anything, so the size of the job is visible up front.
+* Work through the repos that are `behind`, most cards-to-verify first, one at a time, running
+  `repo-cards drift --repo <name>` for the detail on each.
+* **Updating several repos is expensive.** If more than three are behind, do the worst one, report
+  it, and ask before continuing rather than burning the session on all of them.
+* Repos listed as `no deck` are not this command's job. Name them once and move on; they want
+  `/repo-cards:generate` run from inside them.
+
+For each repo in scope, `repo-cards drift --repo <name>` reports the commits since
+`last_update_sha`, the files changed, cards whose anchor changed, cards where the file moved but
+the anchored symbol did not, and changed files no card is anchored to.
 
 Then, in this order:
 

@@ -98,13 +98,40 @@ than none because its staleness is invisible. A repo that only supports 20 hones
 ```yaml
 - id: outbox-row-is-a-prompt          # stable kebab-case slug; state.json keys on it
   tags: [outbox, invariant]           # lowercase; --tag filters on these
-  anchor: src/billing/outbox.py#enqueue   # repo-relative path, plus #symbol where it applies
+  priority: 1                         # 1 foundational, 2 core (default, omit it), 3 detail
+  anchor: src/billing/outbox.py#enqueue   # where the fact is DEFINED. One path, drift-tracked
+  look:                               # how you would go and check. Path: what you would find
+    src/billing/outbox.py#enqueue: the empty payload, and the comment arguing it
+    src/billing/sender.py#render: where the bytes are actually built
+    docs/adr/adr-7-outbox.md: the decision, and what it rejected
   q: >-
     ADR-7: enqueue writes an empty payload. Why is the outbox row blank, and what does that make it?
   a: >-
     It makes the message a prompt, not a snapshot. The row says this invoice changed; the bytes are
     rendered at send time from the invoice as it is then, so a queued payload would go out stale.
 ```
+
+### priority
+
+**1 foundational**: being wrong causes a defect or reopens a settled decision. The invariants, the
+load-bearing splits, the vocabulary that drives design. Expect roughly a quarter of a deck.
+**2 core**: the default, so omit it. **3 detail**: narrow mechanics and ops specifics, real but
+cheap to be wrong about.
+
+Priority decides what surfaces first in a capped session; it does not change the review intervals,
+so a card you demonstrably know still backs off however important it is. Recently added or rewritten
+cards get the same kind of boost, which is why `added:` and `updated:` are worth stamping.
+
+### look
+
+`anchor` is one path, the place the fact is *defined*, and drift tracks it precisely. `look` is the
+**route you would take to answer the question yourself**, and it is what teaches the repo rather
+than the fact: the decision that argued it, the test that pins it, the caller that shows why it
+matters. Two or three entries, each saying what is there, not just where.
+
+Prefer a mix of kinds over three files in the same directory: a decision record, an implementation,
+and the test or spec that holds it to account. Every path must exist; `drift` reports dead ones as
+`FIX THESE` and a route that 404s teaches nothing.
 
 **The question must be answerable from memory, not recognition.** "Is the event log the source of
 truth?" is worthless: yes is guessable. "State ADR-7, including the transaction rule" is a card.
@@ -196,10 +223,16 @@ Then, in order:
    the same pass.
 3. **Then consider new cards** from the uncovered-files list, against the same bar. Most changed
    files warrant no card.
-4. **Fix the topics.** A retired card leaves a dangling id, which `repo-cards topics` flags; a new
+4. **Fix the routes.** `drift` reports two things beside the anchors: cards whose `look` route
+   changed, where the fact is probably intact but the directions moved, and **paths that no longer
+   exist**, which are defects and should be repaired in every pass.
+5. **Fix the topics.** A retired card leaves a dangling id, which `repo-cards topics` flags; a new
    card usually belongs in an existing topic, and a genuinely new feature area may want its own.
-5. Bump `last_update_sha` and `last_update_date`.
-6. Re-validate and report: verified, rewritten, retired, added, topics touched, one line of
+6. **Stamp what changed.** A rewritten card gets `updated: <today>`; a new one gets
+   `added: <today>`. That is the only record of recency, since the deck is not in git, and it is
+   what floats new material to the front of a session.
+7. Bump `last_update_sha` and `last_update_date`.
+8. Re-validate and report: verified, rewritten, retired, added, topics touched, one line of
    reasoning each. Short enough to read in a minute.
 
 If the deck has drifted a long way (hundreds of commits), say so and offer a regenerate rather than
@@ -219,6 +252,7 @@ repo-cards --all            # ignore due dates (cram)
 repo-cards --tag a,b        # several themes at once
 repo-cards --grep PATTERN   # regex over question, answer, anchor and tags
 repo-cards --topic NAME     # one curated topic, graded as usual
+repo-cards --priority 1     # drill only the foundational cards
 ```
 
 `brief` is the read-only counterpart, in deck or topic order rather than shuffled, for rebuilding a
