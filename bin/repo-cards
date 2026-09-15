@@ -594,19 +594,27 @@ def read_key() -> str:
     import termios
     import tty
     fd = sys.stdin.fileno()
-    old = termios.tcgetattr(fd)
+    saved = termios.tcgetattr(fd)
     try:
         tty.setraw(fd)
-        ch = sys.stdin.read(1)
-        if ch == "\x1b":
-            # A bare Escape sends nothing more. Without the timeout this blocks forever.
-            if not select.select([sys.stdin], [], [], 0.05)[0]:
-                return "esc"
-            seq = sys.stdin.read(2)
-            return {"[C": "right", "[D": "left", "[A": "up", "[B": "down"}.get(seq, "esc")
-        return {"\r": "enter", "\n": "enter", "\x03": "q", "\x04": "q"}.get(ch, ch.lower())
+        # os.read, not sys.stdin.read: the buffered reader pulls the whole escape sequence
+        # into Python's own buffer, so the select() below sees an empty file descriptor and
+        # every arrow key decodes as a bare Escape. That is what closed the picker.
+        ch = os.read(fd, 1).decode("utf-8", "replace")
+        if ch != "\x1b":
+            return {"\r": "enter", "\n": "enter", "\x03": "q", "\x04": "q"}.get(ch, ch.lower())
+
+        # A bare Escape sends nothing more, so do not block waiting for a sequence.
+        if not select.select([fd], [], [], 0.05)[0]:
+            return "esc"
+        seq = os.read(fd, 8).decode("utf-8", "replace")
+        # Modifiers arrive as ESC [ 1 ; 5 A and the like, so match on the final letter.
+        final = seq[-1] if seq else ""
+        if seq.startswith(("[", "O")) and final in "ABCD":
+            return {"A": "up", "B": "down", "C": "right", "D": "left"}[final]
+        return "esc"
     finally:
-        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+        termios.tcsetattr(fd, termios.TCSADRAIN, saved)
 
 
 def prompt(msg: str) -> str:
