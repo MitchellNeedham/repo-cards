@@ -1,0 +1,9 @@
+{
+  "name": "repo-cards",
+  "displayName": "Repo Cards",
+  "version": "0.1.0",
+  "description": "Spaced-repetition Q&A decks for codebases, so a repo can be re-entered without re-reading it. Generates cards from a repo's load-bearing decisions, keeps them honest against new commits, and reviews them on a Leitner schedule.",
+  "author": { "name": "Mitchell Needham" },
+  "license": "MIT",
+  "keywords": ["spaced-repetition", "onboarding", "codebase", "documentation", "context-switching"]
+}

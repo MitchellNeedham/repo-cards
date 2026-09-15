@@ -1,0 +1,13 @@
+{
+  "name": "repo-cards",
+  "description": "Spaced-repetition card decks for codebases",
+  "owner": { "name": "Mitchell Needham" },
+  "plugins": [
+    {
+      "name": "repo-cards",
+      "source": "./",
+      "description": "Generate, update and review spaced-repetition Q&A decks for the repos you work across.",
+      "category": "productivity"
+    }
+  ]
+}

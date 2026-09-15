@@ -1,0 +1,495 @@
+#!/usr/bin/env -S uv run --quiet --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = ["pyyaml"]
+# ///
+"""Leitner review over per-repo card decks.
+
+Decks live outside the repos they describe, so nothing is written into a working tree.
+Content and scheduling state are separate files: regenerating a deck never costs progress.
+
+  repo-cards                 due cards across every registered repo
+  repo-cards --repo billing  one repo
+  repo-cards --all           ignore due dates (cram)
+  repo-cards stats           deck health and box distribution
+  repo-cards drift           what changed since a deck was last updated
+  repo-cards register PATH   add a repo
+  repo-cards home            print where everything lives
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import json
+import os
+import random
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+import yaml
+
+# Leitner box -> days until due again. Box 5 is "known", not "finished".
+INTERVALS = {1: 1, 2: 2, 3: 4, 4: 8, 5: 16}
+MAX_BOX = 5
+
+C = {
+    "dim": "\033[2m", "bold": "\033[1m", "reset": "\033[0m",
+    "green": "\033[32m", "red": "\033[31m", "yellow": "\033[33m", "cyan": "\033[36m",
+}
+if not sys.stdout.isatty() or os.environ.get("NO_COLOR"):
+    C = dict.fromkeys(C, "")
+if sys.platform == "win32":
+    # Windows terminals only interpret these once a process asks for it.
+    os.system("")  # noqa: S605, S607
+
+
+def data_home() -> Path:
+    """Where decks, state and notes live.
+
+    REPO_CARDS_HOME wins, then XDG_DATA_HOME on any platform (a user who sets it means it),
+    then the platform's own convention.
+    """
+    if env := os.environ.get("REPO_CARDS_HOME"):
+        return Path(env).expanduser()
+    if xdg := os.environ.get("XDG_DATA_HOME"):
+        return Path(xdg).expanduser() / "repo-cards"
+    if sys.platform == "win32":
+        base = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA")
+        return (Path(base) if base else Path.home() / "AppData" / "Local") / "repo-cards"
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / "repo-cards"
+    return Path.home() / ".local" / "share" / "repo-cards"
+
+
+def registry_path() -> Path:
+    return data_home() / "registry.json"
+
+
+def deck_dir(name: str) -> Path:
+    return data_home() / name
+
+
+def deck_path(name: str) -> Path:
+    return deck_dir(name) / "deck.yaml"
+
+
+def state_file(name: str) -> Path:
+    return deck_dir(name) / "state.json"
+
+
+def today() -> dt.date:
+    return dt.date.today()
+
+
+# --- registry and decks ------------------------------------------------------
+
+def load_registry() -> list[dict]:
+    p = registry_path()
+    if not p.exists():
+        return []
+    try:
+        return json.loads(p.read_text()).get("repos", [])
+    except json.JSONDecodeError:
+        print(f"{C['red']}! registry is not valid JSON: {p}{C['reset']}")
+        return []
+
+
+def save_registry(repos: list[dict]) -> None:
+    p = registry_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps({"repos": repos}, indent=2) + "\n")
+
+
+def load_deck(entry: dict) -> tuple[dict, list[dict]] | None:
+    path = deck_path(entry["name"])
+    if not path.exists():
+        print(f"{C['yellow']}! no deck for {entry['name']} at {path}{C['reset']}")
+        return None
+    try:
+        deck = yaml.safe_load(path.read_text()) or {}
+    except yaml.YAMLError as err:
+        print(f"{C['red']}! deck for {entry['name']} does not parse: {err}{C['reset']}")
+        return None
+    return deck, deck.get("cards") or []
+
+
+def load_state(name: str) -> dict:
+    p = state_file(name)
+    if not p.exists():
+        return {}
+    try:
+        return json.loads(p.read_text())
+    except json.JSONDecodeError:
+        # A corrupt state file costs scheduling, not cards. Start over rather than refuse to run.
+        print(f"{C['yellow']}! state unreadable, starting fresh: {p}{C['reset']}")
+        return {}
+
+
+def save_state(name: str, state: dict) -> None:
+    # Only graded cards are persisted. Scheduling a card nobody has seen is the same as having
+    # no row for it, and 80 identical defaults make the file unreadable.
+    seen = {cid: cs for cid, cs in state.items() if cs.get("seen", 0) > 0}
+    p = state_file(name)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(seen, indent=2, sort_keys=True) + "\n")
+
+
+def card_state(state: dict, card_id: str) -> dict:
+    return state.setdefault(card_id, {"box": 1, "due": today().isoformat(), "seen": 0, "lapses": 0})
+
+
+def is_due(cs: dict) -> bool:
+    return dt.date.fromisoformat(cs["due"]) <= today()
+
+
+def collect(args) -> list[tuple[dict, dict, dict]]:
+    """Gather (entry, card, state) for everything in scope. States are shared per deck."""
+    out, states = [], {}
+    for entry in load_registry():
+        if args.repo and entry["name"] != args.repo:
+            continue
+        loaded = load_deck(entry)
+        if loaded is None:
+            continue
+        _deck, cards = loaded
+        state = states.setdefault(entry["name"], load_state(entry["name"]))
+        for card in cards:
+            if args.tag and args.tag not in card.get("tags", []):
+                continue
+            cs = card_state(state, card["id"])
+            if args.new and cs["seen"] > 0:
+                continue
+            if not args.all and not args.new and not is_due(cs):
+                continue
+            out.append((entry, card, state))
+    return out
+
+
+# --- rendering ---------------------------------------------------------------
+
+def wrap(text: str, width: int, indent: str = "  ") -> str:
+    """Wrap, but leave pre-formatted lines (from YAML literal blocks) alone."""
+    lines = []
+    for para in str(text).rstrip().split("\n"):
+        if not para.strip():
+            lines.append("")
+        elif len(para) + len(indent) <= width and para != para.strip():
+            lines.append(indent + para)
+        else:
+            cur = ""
+            for word in para.split():
+                if cur and len(cur) + len(word) + 1 + len(indent) > width:
+                    lines.append(indent + cur)
+                    cur = word
+                else:
+                    cur = f"{cur} {word}".strip()
+            if cur:
+                lines.append(indent + cur)
+    return "\n".join(lines)
+
+
+def prompt(msg: str) -> str:
+    try:
+        return input(msg).strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        return "q"
+
+
+# --- review ------------------------------------------------------------------
+
+def cmd_review(args) -> int:
+    queue = collect(args)
+    if not queue:
+        scope = f" tagged {args.tag}" if args.tag else ""
+        if not load_registry():
+            print("No repos registered. Add one with: repo-cards register /path/to/repo")
+            return 0
+        print(f"{C['green']}Nothing due{scope}.{C['reset']} {C['dim']}--all to cram, --new for unseen.{C['reset']}")
+        return 0
+
+    random.shuffle(queue)
+    if args.limit:
+        queue = queue[: args.limit]
+
+    width = min(shutil.get_terminal_size((90, 24)).columns, 96)
+    touched: dict[str, dict] = {}
+    right = wrong = skipped = 0
+
+    print(f"\n{C['bold']}{len(queue)} card(s){C['reset']} {C['dim']}[enter] reveal  y got it  n missed  s skip  q quit{C['reset']}\n")
+
+    for n, (entry, card, state) in enumerate(queue, 1):
+        touched[entry["name"]] = state
+        cs = card_state(state, card["id"])
+        print("─" * width)
+        print(f"{C['dim']}{n}/{len(queue)}  {entry['name']}  box {cs['box']}  {' '.join(card.get('tags', []))}{C['reset']}\n")
+        print(f"{C['bold']}{wrap(card['q'], width)}{C['reset']}\n")
+
+        if (ans := prompt(f"{C['dim']}  [enter] reveal, s skip, q quit > {C['reset']}")) == "q":
+            break
+        if ans == "s":
+            skipped += 1
+            print()
+            continue
+
+        print(f"\n{C['cyan']}{wrap(card['a'], width)}{C['reset']}")
+        print(f"\n{C['dim']}  anchor: {card.get('anchor', '-')}{C['reset']}\n")
+
+        while (grade := prompt(f"  {C['green']}y{C['reset']} got it / {C['red']}n{C['reset']} missed / s skip / q quit > ")) not in ("y", "n", "s", "q"):
+            pass
+        if grade == "q":
+            break
+        if grade == "s":
+            skipped += 1
+            print()
+            continue
+
+        cs["seen"] += 1
+        cs["last_seen"] = today().isoformat()
+        if grade == "y":
+            right += 1
+            cs["box"] = min(cs["box"] + 1, MAX_BOX)
+        else:
+            wrong += 1
+            cs["lapses"] += 1
+            cs["box"] = 1  # a fact you have lost is not most of the way to known
+        cs["due"] = (today() + dt.timedelta(days=INTERVALS[cs["box"]])).isoformat()
+        print()
+
+    for name, state in touched.items():
+        save_state(name, state)
+
+    graded = right + wrong
+    print("─" * width)
+    print(f"{C['bold']}{right} right, {wrong} missed, {skipped} skipped{C['reset']}"
+          f"  {C['dim']}({round(100 * right / graded)}%){C['reset']}" if graded else
+          f"{C['bold']}{skipped} skipped{C['reset']}")
+    if wrong:
+        print(f"{C['dim']}Missed cards are back in box 1 and due tomorrow.{C['reset']}")
+    return 0
+
+
+# --- stats, list -------------------------------------------------------------
+
+def cmd_stats(args) -> int:
+    repos = load_registry()
+    if not repos:
+        print("No repos registered. Add one with: repo-cards register /path/to/repo")
+        return 0
+    for entry in repos:
+        if args.repo and entry["name"] != args.repo:
+            continue
+        loaded = load_deck(entry)
+        if loaded is None:
+            continue
+        deck, cards = loaded
+        state = load_state(entry["name"])
+        boxes = dict.fromkeys(range(1, MAX_BOX + 1), 0)
+        due = unseen = 0
+        for card in cards:
+            cs = state.get(card["id"])
+            if cs is None:
+                unseen += 1
+                due += 1
+                boxes[1] += 1
+                continue
+            boxes[cs["box"]] += 1
+            if is_due(cs):
+                due += 1
+        bar = "  ".join(f"{'▁▃▅▆█'[b - 1]} box{b} {C['dim']}{boxes[b]}{C['reset']}" for b in range(1, MAX_BOX + 1))
+        print(f"\n{C['bold']}{entry['name']}{C['reset']}  {C['dim']}{len(cards)} cards, {deck.get('last_update_sha', '?')}{C['reset']}")
+        print(f"  {C['yellow']}{due} due{C['reset']}, {unseen} never seen")
+        print(f"  {bar}")
+        lapsed = sorted(((c, s["lapses"]) for c, s in state.items() if s.get("lapses", 0) >= 2), key=lambda kv: -kv[1])[:5]
+        if lapsed:
+            print(f"  {C['dim']}stickiest: {', '.join(f'{c} (x{n})' for c, n in lapsed)}{C['reset']}")
+    print()
+    return 0
+
+
+def cmd_list(args) -> int:
+    for entry in load_registry():
+        if args.repo and entry["name"] != args.repo:
+            continue
+        loaded = load_deck(entry)
+        if loaded is None:
+            continue
+        _deck, cards = loaded
+        state = load_state(entry["name"])
+        for card in cards:
+            if args.tag and args.tag not in card.get("tags", []):
+                continue
+            cs = state.get(card["id"], {"box": 1, "due": "never"})
+            flag = f"{C['yellow']}due{C['reset']}" if cs["due"] == "never" or is_due(cs) else f"{C['dim']}{cs['due']}{C['reset']}"
+            print(f"  {C['dim']}box{cs['box']}{C['reset']} {flag:>22}  {card['id']:<38} {C['dim']}{','.join(card.get('tags', []))}{C['reset']}")
+    return 0
+
+
+# --- drift: the mechanical half of `update` ----------------------------------
+
+def git(root: Path, *args: str) -> str:
+    try:
+        return subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True, check=True).stdout.strip()
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return ""
+
+
+def cmd_drift(args) -> int:
+    """Report what changed since a deck was generated, and which cards that touches.
+
+    Deliberately mechanical: it says what to look at, and the skill decides what a card
+    should now say. Written to be read by Claude as well as by a person.
+    """
+    for entry in load_registry():
+        if args.repo and entry["name"] != args.repo:
+            continue
+        loaded = load_deck(entry)
+        if loaded is None:
+            continue
+        deck, cards = loaded
+        root = Path(entry["root"]).expanduser()
+        sha = deck.get("last_update_sha")
+
+        print(f"\n{C['bold']}=== {entry['name']} ==={C['reset']}")
+        print(f"root: {root}")
+        print(f"deck: {deck_path(entry['name'])}")
+        print(f"deck generated at: {sha or '(unrecorded)'}")
+        if not root.is_dir():
+            print(f"{C['red']}root does not exist on this machine; re-register it{C['reset']}")
+            continue
+
+        head = git(root, "rev-parse", "--short", "HEAD")
+        print(f"HEAD now: {head or '(not a git repo)'}")
+        if not sha or not head:
+            print("no baseline to diff against; treat every card as unverified")
+            continue
+        if sha == head:
+            print(f"{C['green']}up to date, no commits since the deck was generated{C['reset']}")
+            continue
+
+        log = git(root, "log", "--oneline", f"{sha}..HEAD")
+        changed = [f for f in git(root, "diff", "--name-only", f"{sha}..HEAD").split("\n") if f]
+        print(f"\n--- commits since {sha} ({len(log.splitlines())}) ---\n{log}")
+        print(f"\n--- files changed ({len(changed)}) ---")
+        print("\n".join(f"  {f}" for f in changed) or "  (none)")
+
+        # An anchor carrying #symbol is narrowed further: one commit to a 700-line module
+        # should not flag every card drawn from it, or the update drowns in false positives.
+        changed_set = set(changed)
+        diff_cache: dict[str, str] = {}
+        hot, cold = [], []
+        for c in cards:
+            path, _, symbol = str(c.get("anchor", "")).partition("#")
+            if not path:
+                continue
+            if not (path in changed_set or any(f.startswith(path.rstrip("/") + "/") for f in changed_set)):
+                continue
+            if not symbol:
+                hot.append(c)
+                continue
+            if path not in diff_cache:
+                diff_cache[path] = git(root, "diff", "-U5", f"{sha}..HEAD", "--", path)
+            # Hunk headers carry the enclosing function name, so a symbol absent from the
+            # whole diff was very likely not touched.
+            (hot if symbol in diff_cache[path] else cold).append(c)
+
+        print(f"\n--- cards whose anchor changed ({len(hot)}) : VERIFY THESE ---")
+        print("\n".join(f"  {c['id']:<40} {c['anchor']}" for c in hot) or "  (none)")
+        if cold:
+            print(f"\n--- file changed but the anchored symbol was not touched ({len(cold)}) : likely fine ---")
+            print("\n".join(f"  {c['id']:<40} {c['anchor']}" for c in cold))
+
+        anchored = {str(c.get("anchor", "")).split("#")[0] for c in cards}
+        uncovered = [f for f in changed if f not in anchored]
+        print(f"\n--- changed files no card is anchored to ({len(uncovered)}) : CANDIDATES ---")
+        print("\n".join(f"  {f}" for f in uncovered) or "  (none)")
+    print()
+    return 0
+
+
+# --- registry management -----------------------------------------------------
+
+def cmd_register(args) -> int:
+    if not args.path:
+        print(f"{C['red']}usage: repo-cards register /path/to/repo [--name NAME]{C['reset']}")
+        return 1
+    root = Path(args.path).expanduser().resolve()
+    if not root.is_dir():
+        print(f"{C['red']}no such directory: {root}{C['reset']}")
+        return 1
+    name = args.name or root.name
+    repos = [r for r in load_registry() if r["name"] != name]
+    repos.append({"name": name, "root": str(root)})
+    repos.sort(key=lambda r: r["name"])
+    save_registry(repos)
+    (deck_dir(name) / "notes").mkdir(parents=True, exist_ok=True)
+    print(f"{C['green']}registered {name}{C['reset']}\n  root: {root}\n  deck: {deck_path(name)}")
+    if not deck_path(name).exists():
+        print(f"{C['yellow']}  no deck yet: ask Claude to \"generate repo cards\" in that repo{C['reset']}")
+    return 0
+
+
+def cmd_forget(args) -> int:
+    if not args.path:
+        print(f"{C['red']}usage: repo-cards forget NAME{C['reset']}")
+        return 1
+    name = args.path
+    repos = load_registry()
+    if not any(r["name"] == name for r in repos):
+        print(f"{C['yellow']}{name} is not registered{C['reset']}")
+        return 1
+    save_registry([r for r in repos if r["name"] != name])
+    print(f"{C['green']}unregistered {name}{C['reset']}")
+    print(f"{C['dim']}Its deck and progress are kept at {deck_dir(name)}; delete that by hand if you meant to.{C['reset']}")
+    return 0
+
+
+def cmd_repos(args) -> int:
+    repos = load_registry()
+    if not repos:
+        print("No repos registered. Add one with: repo-cards register /path/to/repo")
+        return 0
+    for r in repos:
+        has_deck = deck_path(r["name"]).exists()
+        has_root = Path(r["root"]).expanduser().is_dir()
+        status = f"{C['green']}ok{C['reset']}" if has_deck and has_root else (
+            f"{C['red']}no deck{C['reset']}" if not has_deck else f"{C['red']}root missing{C['reset']}")
+        print(f"  {r['name']:<20} {status:<20} {r['root']}")
+    return 0
+
+
+def cmd_home(args) -> int:
+    d = data_home()
+    print(f"platform:  {sys.platform}")
+    print(f"data home: {d}{'' if d.exists() else '  (not created yet)'}")
+    print(f"registry:  {registry_path()}")
+    print(f"decks:     {d}/<name>/deck.yaml")
+    print(f"state:     {d}/<name>/state.json")
+    print(f"notes:     {d}/<name>/notes/")
+    print(f"\n{C['dim']}Override with REPO_CARDS_HOME, or XDG_DATA_HOME on any platform.{C['reset']}")
+    return 0
+
+
+def main() -> int:
+    p = argparse.ArgumentParser(prog="repo-cards", description=__doc__,
+                                formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("command", nargs="?", default="review",
+                   choices=["review", "stats", "list", "drift", "register", "forget", "repos", "home"])
+    p.add_argument("path", nargs="?", help="for `register`: repo root. for `forget`: the name")
+    p.add_argument("--name", help="for `register`: deck name (default: directory name)")
+    p.add_argument("--repo", help="limit to one registered repo")
+    p.add_argument("--tag", help="limit to one tag")
+    p.add_argument("--limit", type=int, help="cap the session length")
+    p.add_argument("--all", action="store_true", help="ignore due dates (cram)")
+    p.add_argument("--new", action="store_true", help="only cards never seen")
+    args = p.parse_args()
+    return {
+        "review": cmd_review, "stats": cmd_stats, "list": cmd_list, "drift": cmd_drift,
+        "register": cmd_register, "forget": cmd_forget, "repos": cmd_repos, "home": cmd_home,
+    }[args.command](args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
