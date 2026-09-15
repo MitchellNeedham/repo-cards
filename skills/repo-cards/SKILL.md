@@ -287,7 +287,13 @@ repo-cards --grep PATTERN   # regex over question, answer, anchor and tags
 repo-cards --topic NAME     # one curated topic, graded as usual
 repo-cards --priority 1     # drill only the foundational cards
 repo-cards --no-pick        # skip the picker and take everything due
+repo-cards learn            # everything visible, nothing graded
+repo-cards test             # the default: answer hidden, self-graded
 ```
+
+**`recent` is a computed topic**, not one to write: cards added or rewritten in the last week,
+offered automatically once a deck has enough history for it to mean something. Stamping `added:`
+and `updated:` during an update is what feeds it.
 
 Run bare in a terminal, `repo-cards` opens a picker: choose which decks to mix, and drill into any
 of them with `→` to pick topics. Both lists scroll, with paging and `home`/`end`. In the session, `←`/`→` move between cards (there is no skip),

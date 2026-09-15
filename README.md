@@ -92,7 +92,17 @@ them to choose topics within it.
 Both lists scroll once they outgrow the terminal, with `page up`/`page down` and `home`/`end`
 (or `g`/`G`).
 
-Then one card fills the terminal. `←`/`→` move between cards, `enter` reveals, `y`/`n` grade.
+Then one card at a time, sized to its content and centred. `←`/`→` move between cards, `enter`
+reveals, `y`/`n` grade.
+
+**Two modes.** `repo-cards test` (the default) hides the answer until you have had a go, and is the
+only one that moves a card's box. `repo-cards learn` shows everything at once and grades nothing,
+for building the picture or meeting what an update just changed. `l` switches mid-session, because
+realising you do not know an area is exactly when you want to stop testing and start reading.
+
+**A `recent` topic appears on its own** once a deck has some history: whatever was added or
+rewritten in the last week, newest first. Nobody would hand-maintain a topic whose membership turns
+over weekly, and it is the first thing you want after an update.
 Boxes 1 to 5, due after 1, 2, 4, 8 and 16 days; a miss drops to box 1 rather than back one step,
 because a fact you have lost is not most of the way to known.
 
