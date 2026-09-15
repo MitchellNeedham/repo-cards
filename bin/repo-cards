@@ -1066,7 +1066,7 @@ def cmd_review(args) -> int:
             print(f"{C['green']}Nothing due in that selection.{C['reset']}"
                   f" {C['dim']}--all to cram.{C['reset']}")
             return 0
-        return run_session(queue)
+        return run_session(queue, args.mode)
 
     queue = session_rows(args)
     if not queue:
@@ -1076,10 +1076,10 @@ def cmd_review(args) -> int:
         scope = f" tagged {args.tag}" if args.tag else ""
         print(f"{C['green']}Nothing due{scope}.{C['reset']} {C['dim']}--all to cram, --new for unseen.{C['reset']}")
         return 0
-    return run_session(queue)
+    return run_session(queue, args.mode)
 
 
-def run_session(queue: list[tuple]) -> int:
+def run_session(queue: list[tuple], mode: str = "test") -> int:
     """One pass over the queue, navigable. Grades are held until the session ends.
 
     Two modes, because reading and being tested are different activities and doing both in
@@ -1102,25 +1102,27 @@ def run_session(queue: list[tuple]) -> int:
             entry, card, state, deck, _churn = queue[i]
             cs = card_state(state, card["id"])
             draw_card(queue, i, kinds[card["id"]], roots[entry["name"]], cs,
-                      i in revealed, graded.get(i))
+                      mode == "learn" or i in revealed, graded.get(i), mode)
             key = read_key()
 
             if key in ("q", "esc"):
                 break
-            if key == "left":
+            if key == "l":
+                mode = "learn" if mode == "test" else "test"
+            elif key == "left":
                 i = max(0, i - 1)
             elif key == "right":
                 if i + 1 >= len(queue):
                     break
                 i += 1
             elif key == "enter":
-                if i in revealed:
+                if mode == "learn" or i in revealed:
                     if i + 1 >= len(queue):
                         break
                     i += 1
                 else:
                     revealed.add(i)
-            elif key in ("y", "n"):
+            elif key in ("y", "n") and mode == "test":
                 revealed.add(i)
                 graded[i] = key
                 if i + 1 >= len(queue):
@@ -1134,7 +1136,7 @@ def run_session(queue: list[tuple]) -> int:
     return finish_session(queue, graded)
 
 
-def draw_card(queue, i, kind, root, cs, revealed, grade) -> None:
+def draw_card(queue, i, kind, root, cs, revealed, grade, mode="test") -> None:
     entry, card, _state, _deck, _churn = queue[i]
     cols, rows = shutil.get_terminal_size((90, 24))
     # Wrap to the widest the box may ever be, then shrink the box to what the text used.
@@ -1149,7 +1151,9 @@ def draw_card(queue, i, kind, root, cs, revealed, grade) -> None:
     head = f"{accent}{repo}{C['reset']}"
     for t in topics[:2]:
         head += f" {topic_colour(t, siblings)}▌{t}{C['reset']}"
-    head += f" {C['dim']}·{C['reset']} {sgr(KIND_COLOUR[kind])}{kind_label(kind)}{C['reset']}"
+    shown_kind = "learn" if mode == "learn" else kind_label(kind)
+    kind_col = sgr(214 if mode == "learn" else KIND_COLOUR[kind])
+    head += f" {C['dim']}·{C['reset']} {kind_col}{shown_kind}{C['reset']}"
 
     head_right = (f"{C['dim']}{i + 1}/{len(queue)}{C['reset']}  "
                   f"{sgr(BOX_COLOUR[cs['box']])}box {cs['box']}{C['reset']}  "
@@ -1170,8 +1174,12 @@ def draw_card(queue, i, kind, root, cs, revealed, grade) -> None:
     for block in body:
         flat.extend(block.split("\n"))
 
-    keys = ("←/→ · enter reveal · q quit" if not revealed
-            else "←/→ · y got it · n missed · q quit")
+    if mode == "learn":
+        keys = "←/→ move · l test · q quit"
+    elif not revealed:
+        keys = "←/→ · enter reveal · l learn · q quit"
+    else:
+        keys = "←/→ · y got it · n missed · l learn · q quit"
     mark = {"y": f"{sgr(114)}✓ got it{C['reset']}",
             "n": f"{sgr(203)}✗ missed{C['reset']}"}.get(grade, "")
     foot = f"{C['dim']}{keys}{C['reset']}" + (f"  {mark}" if mark else "")
@@ -1674,8 +1682,8 @@ def main() -> int:
     p = argparse.ArgumentParser(prog="repo-cards", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("command", nargs="?", default="review",
-                   choices=["review", "brief", "topics", "stats", "list", "drift",
-                            "register", "forget", "repos", "home"])
+                   choices=["review", "test", "learn", "brief", "topics", "stats", "list",
+                            "drift", "register", "forget", "repos", "home"])
     p.add_argument("path", nargs="?", help="for `register`: repo root. for `forget`: the name")
     p.add_argument("--name", help="for `register`: deck name (default: directory name)")
     p.add_argument("--repo", help="limit to one registered repo")
@@ -1685,12 +1693,18 @@ def main() -> int:
     p.add_argument("--limit", type=int, help="cap the session length")
     p.add_argument("--all", action="store_true", help="ignore due dates (cram)")
     p.add_argument("--new", action="store_true", help="only cards never seen")
+    p.add_argument("--mode", choices=["test", "learn"], default=None,
+                   help="test hides the answer and grades; learn shows everything, grades nothing")
     p.add_argument("--no-pick", action="store_true",
                    help="skip the interactive picker and review everything due")
     p.add_argument("--full", action="store_true", help="for `drift`: full detail for every repo, not a summary")
     p.add_argument("--priority", type=int, choices=[1, 2, 3],
                    help="only cards at this priority (1 foundational, 2 core, 3 detail)")
     args = p.parse_args()
+    # `learn` and `test` are review with the mode chosen up front.
+    if args.command in ("learn", "test"):
+        args.mode, args.command = args.command, "review"
+    args.mode = args.mode or "test"
     return {
         "review": cmd_review, "brief": cmd_brief, "topics": cmd_topics,
         "stats": cmd_stats, "list": cmd_list, "drift": cmd_drift,
