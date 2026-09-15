@@ -304,6 +304,37 @@ def card_matches(card: dict, tags: set[str], grep) -> bool:
     return True
 
 
+RECENT_TOPIC = "recent"
+RECENT_TOPIC_DAYS = 7
+
+
+def synthetic_topics(deck: dict) -> dict:
+    """Topics computed from the deck rather than declared in it.
+
+    `recent` is the one that matters in practice: after an update you want to meet what
+    just changed, and nobody is going to hand-maintain a topic whose membership turns over
+    every week. Ordered newest first, because that is the order you care about it in.
+    """
+    cards = deck.get("cards") or []
+    fresh = [(d, c) for c in cards
+             if (d := card_date(c, deck)) and (today() - d).days <= RECENT_TOPIC_DAYS]
+    # A freshly generated deck is entirely "recent", and a topic that means everything is
+    # not a filter. It starts being useful once the deck has some history behind it.
+    if not fresh or len(fresh) > 0.8 * len(cards):
+        return {}
+    fresh.sort(key=lambda dc: dc[0], reverse=True)
+    return {RECENT_TOPIC: {
+        "description": f"Added or rewritten in the last {RECENT_TOPIC_DAYS} days",
+        "cards": [c["id"] for _, c in fresh],
+        "synthetic": True,
+    }}
+
+
+def all_topics(deck: dict) -> dict:
+    """Declared topics plus computed ones. A declared topic wins on a name clash."""
+    return {**synthetic_topics(deck), **(deck.get("topics") or {})}
+
+
 def topic_cards(deck: dict, name: str) -> tuple[dict | None, list[dict], list[str]]:
     """A topic's cards in the order the topic declares, plus any ids that no longer exist.
 
@@ -311,7 +342,7 @@ def topic_cards(deck: dict, name: str) -> tuple[dict | None, list[dict], list[st
     direction. Missing ids are returned rather than skipped silently, because they mean the
     topic outlived a card and the deck needs an update.
     """
-    topic = (deck.get("topics") or {}).get(name)
+    topic = all_topics(deck).get(name)
     if topic is None:
         return None, [], []
     by_id = {c["id"]: c for c in deck.get("cards") or []}
@@ -352,7 +383,7 @@ def collect(args) -> list[tuple[dict, dict, dict, dict, tuple]]:
 
 # --- rendering ---------------------------------------------------------------
 
-LIST_MARKER = re.compile(r"^(\s*)((?:\d+[.)]|[-*\u2022])\s+)")
+LIST_MARKER = re.compile(r"^(\s*)((?:\d+[.)]|[-*•])\s+)")
 
 
 def wrap(text: str, width: int, indent: str = "  ") -> str:
@@ -520,6 +551,27 @@ def tag_colour(tag: str) -> str:
     return sgr(_PALETTE[zlib.crc32(("#" + tag).encode()) % len(_PALETTE)])
 
 
+def fit_width(lines: list[str], cols: int, *chrome: str) -> int:
+    """The narrowest box that holds `lines` and its chrome, within the terminal.
+
+    Content first, terminal second: a box sized to the screen wastes the reader's eye on
+    air, and one sized past the screen breaks every row.
+    """
+    content = max((visible_len(ln) for ln in lines), default=0)
+    needed = max(content, max((visible_len(c) for c in chrome), default=0)) + 4
+    return max(MIN_WIDTH, min(needed, TARGET_WIDTH, cols - 2))
+
+
+def place(boxed: list[str], cols: int, rows: int, centre: bool = True) -> str:
+    """Centre the box in the terminal, horizontally and vertically."""
+    if not boxed:
+        return ""
+    box_w = visible_len(boxed[0])
+    left = " " * max(0, (cols - box_w) // 2) if centre else ""
+    top = max(0, (rows - len(boxed) - 1) // 2) if centre else 0
+    return "\n" * top + "\n".join(left + ln for ln in boxed)
+
+
 def frame(lines: list[str], width: int, *, head: str = "", head_right: str = "",
           foot: str = "", border: str = "", divider_at: int | None = None) -> list[str]:
     """Wrap pre-wrapped lines in a rounded box.
@@ -541,26 +593,26 @@ def frame(lines: list[str], width: int, *, head: str = "", head_right: str = "",
         """
         mid = width - 2                 # columns between the two corners
         min_rule = 2                    # at least one dash each side of the text
-        tail = f" {text_right} \u2500" if text_right else ""
-        head = f"\u2500 {text} " if text else ""
+        tail = f" {text_right} ─" if text_right else ""
+        head = f"─ {text} " if text else ""
 
         if visible_len(head) + visible_len(tail) + min_rule > mid:
             tail = ""                   # the count is the first thing to go
         if visible_len(head) + min_rule > mid:
-            head = f"\u2500 {ansi_truncate(text, max(0, mid - min_rule - 3))}\u2026 "
+            head = f"─ {ansi_truncate(text, max(0, mid - min_rule - 3))}… "
 
         room = max(0, mid - visible_len(head) - visible_len(tail))
-        return f"{b}{left}{r}{head}{b}{'\u2500' * room}{r}{tail}{b}{right}{r}"
+        return f"{b}{left}{r}{head}{b}{'─' * room}{r}{tail}{b}{right}{r}"
 
-    out.append(bar("\u256d", "\u256e", head, head_right))
+    out.append(bar("╭", "╮", head, head_right))
     for i, ln in enumerate(lines):
         if divider_at is not None and i == divider_at:
-            out.append(f"{b}\u251c{'\u2500' * (width - 2)}\u2524{r}")
+            out.append(f"{b}├{'─' * (width - 2)}┤{r}")
         vis = visible_len(ln)
         if vis > inner:
             ln, vis = ansi_truncate(ln, inner), inner
-        out.append(f"{b}\u2502{r} {ln}{' ' * (inner - vis)} {b}\u2502{r}")
-    out.append(bar("\u2570", "\u256f", foot))
+        out.append(f"{b}│{r} {ln}{' ' * (inner - vis)} {b}│{r}")
+    out.append(bar("╰", "╯", foot))
     return out
 
 
@@ -693,7 +745,7 @@ def route_lines(card: dict, root: Path, width: int) -> list[str]:
     out = []
     for pth, what in look_entries(card):
         chunks = hard_break(pth, width - 4)
-        out.append(f"{C['dim']}  \u2192 {C['reset']}{link(chunks[0], root, pth)}")
+        out.append(f"{C['dim']}  → {C['reset']}{link(chunks[0], root, pth)}")
         out += [f"    {link(ch, root, pth)}" for ch in chunks[1:]]
         if what:
             out.append(f"{C['dim']}{wrap(what, width, '    ')}{C['reset']}")
@@ -732,8 +784,10 @@ def deck_summary(entry: dict) -> dict | None:
     deck, cards = loaded
     state = load_state(entry["name"])
     due = sum(1 for c in cards if (cs := state.get(c["id"])) is None or is_due(cs))
-    return {"entry": entry, "deck": deck, "cards": cards, "due": due,
-            "topics": list((deck.get("topics") or {}).keys())}
+    head = git(Path(entry["root"]).expanduser(), "rev-parse", "--short", "HEAD")
+    behind = bool(head and deck.get("last_update_sha") and head != deck["last_update_sha"])
+    return {"entry": entry, "deck": deck, "cards": cards, "due": due, "behind": behind,
+            "topics": list(all_topics(deck).keys())}
 
 
 def pick_session(args) -> dict[str, set[str] | None] | None:
@@ -741,9 +795,14 @@ def pick_session(args) -> dict[str, set[str] | None] | None:
 
     A value of None for a repo means every card in it; a set means those topics only.
     """
-    decks = [d for d in (deck_summary(e) for e in load_registry()) if d]
+    registry = load_registry()
+    summaries = [(e, deck_summary(e)) for e in registry]
+    decks = [d for _e, d in summaries if d]
+    undecked = [e["name"] for e, d in summaries if d is None]
     if not decks:
-        print("No decks yet. Run /repo-cards:generate inside a repo.")
+        print("No decks yet. Run /repo-cards:generate inside a repo to make one.")
+        if undecked:
+            print(f"{C['dim']}Registered and waiting: {', '.join(undecked)}{C['reset']}")
         return None
     # Pre-select whatever has work waiting, so enter on an untouched picker does the
     # obvious thing rather than nothing.
@@ -758,7 +817,7 @@ def pick_session(args) -> dict[str, set[str] | None] | None:
     try:
         while True:
             if view == "repos":
-                repo_off = draw_repo_picker(decks, chosen, row, repo_off)
+                repo_off = draw_repo_picker(decks, chosen, row, repo_off, undecked)
             else:
                 topic_off = draw_topic_picker(decks[row], chosen, topic_row, topic_off)
             key = read_key()
@@ -839,13 +898,13 @@ def scroll_window(count: int, cursor: int, offset: int, height: int, margin: int
 def _frame(title: str, rows_out: list[str], keys: str, accent: str = "") -> None:
     """The picker, in the same box as a card, so the two do not look like different apps."""
     cols, rows = shutil.get_terminal_size((90, 24))
-    width = min(cols, 100)
     body = [""] + rows_out + [""]
     body = body[: max(1, rows - 4)]
-    boxed = frame(body, width, head=title, foot=f"{C['dim']}{keys}{C['reset']}",
-                  border=f"{C['dim']}{accent}")
+    foot = f"{C['dim']}{keys}{C['reset']}"
+    width = fit_width(body, cols, title, foot)
+    boxed = frame(body, width, head=title, foot=foot, border=f"{C['dim']}{accent}")
     sys.stdout.write("\033[H\033[J" if FULLSCREEN else "\n")
-    sys.stdout.write("\n".join(boxed) + "\n" * max(1, rows - len(boxed)))
+    sys.stdout.write(place(boxed, cols, rows, centre=FULLSCREEN) + "\n")
     sys.stdout.flush()
 
 
@@ -857,12 +916,29 @@ def picker_height() -> int:
 
 def _indicators(out: list[str], offset: int, end: int, count: int) -> list[str]:
     above, below = offset, count - end
-    head = f" {C['dim']}\u2191 {above} more{C['reset']}" if above else ""
-    foot = f" {C['dim']}\u2193 {below} more{C['reset']}" if below else ""
+    head = f" {C['dim']}↑ {above} more{C['reset']}" if above else ""
+    foot = f" {C['dim']}↓ {below} more{C['reset']}" if below else ""
     return ([head] if head else []) + out + ([foot] if foot else [])
 
 
-def draw_repo_picker(decks, chosen, row, offset) -> int:
+def command_hints(decks, undecked) -> list[str]:
+    """Name the command that fixes what the picker is showing.
+
+    The two slash commands are the half of this tool that is not the CLI, and the picker is
+    the only place they would ever be discovered.
+    """
+    out = []
+    stale = [d["entry"]["name"] for d in decks if d.get("behind")]
+    if stale:
+        out.append(f" {C['yellow']}⟳{C['reset']} {C['dim']}{', '.join(stale)} moved since "
+                   f"the deck was written · {C['reset']}/repo-cards:update")
+    if undecked:
+        shown = ", ".join(undecked[:3]) + (f" +{len(undecked) - 3}" if len(undecked) > 3 else "")
+        out.append(f"   {C['dim']}no deck yet: {shown} · {C['reset']}/repo-cards:generate")
+    return ([""] + out) if out else []
+
+
+def draw_repo_picker(decks, chosen, row, offset, undecked=()) -> int:
     height = picker_height()
     offset, start, end = scroll_window(len(decks), row, offset, height)
     out = []
@@ -876,11 +952,12 @@ def draw_repo_picker(decks, chosen, row, offset) -> int:
                   else f"{C['dim']}all topics{C['reset']}" if sel else "")
         due = f"{C['yellow']}{d['due']:>4} due{C['reset']}" if d["due"] else f"{C['dim']}   0 due{C['reset']}"
         more = f"{C['dim']} →{C['reset']}" if d["topics"] else "  "
-        out.append(f" {cursor} {box} {name_colour(name)}{name:<18}{C['reset']}"
+        stale = f"{C['yellow']}⟳{C['reset']}" if d.get("behind") else " "
+        out.append(f" {cursor} {box} {name_colour(name)}{name:<16}{C['reset']}{stale} "
                    f"{C['dim']}{len(d['cards']):>4} cards{C['reset']}  {due}{more}  {detail}")
     _frame(f"{C['bold']}Which decks?{C['reset']} "
            f"{C['dim']}{len(chosen)}/{len(decks)} selected{C['reset']}",
-           _indicators(out, offset, end, len(decks)),
+           _indicators(out, offset, end, len(decks)) + command_hints(decks, undecked),
            "↑/↓ move · space toggle · → topics · enter start · q cancel")
     return offset
 
@@ -899,7 +976,7 @@ def draw_topic_picker(d, chosen, row, offset) -> int:
         if t == "all":
             label, note = f"{C['dim']}everything{C['reset']}", ""
         else:
-            topic = (d["deck"].get("topics") or {})[t]
+            topic = all_topics(d["deck"])[t]
             _t, cards, _m = topic_cards(d["deck"], t)
             label = f"{topic_colour(t, tuple(d['topics']))}{t}{C['reset']}"
             note = f"{C['dim']}{len(cards):>3} cards  {topic.get('description', '')}{C['reset']}"
@@ -948,6 +1025,13 @@ def picked_rows(args, chosen: dict[str, set[str] | None]) -> list[tuple]:
 
 ALT_ON, ALT_OFF = "\033[?1049h\033[?25l", "\033[?1049l\033[?25h"
 
+# A card is prose, so it gets a comfortable measure rather than the whole terminal: a line
+# 160 columns wide is hard to read back to. The box then shrinks to whatever the content
+# actually needs, and is centred, so a short card on a big screen is not a wide box with a
+# lot of air in it.
+TARGET_WIDTH = 78
+MIN_WIDTH = 44
+
 #: Marks where the rule between question and answer goes. A sentinel rather than an index,
 #: because the height trim rewrites the list underneath it.
 DIVIDER = "\x00rule\x00"
@@ -961,8 +1045,12 @@ def session_rows(args) -> list[tuple]:
 
 
 def topics_of(card: dict, deck: dict) -> list[str]:
-    return [name for name, t in (deck.get("topics") or {}).items()
-            if card["id"] in (t.get("cards") or [])]
+    """Topics this card belongs to, declared ones first so the badge is the curated name."""
+    declared = [n for n, t in (deck.get("topics") or {}).items()
+                if card["id"] in (t.get("cards") or [])]
+    computed = [n for n, t in synthetic_topics(deck).items()
+                if card["id"] in (t.get("cards") or [])]
+    return declared + computed
 
 
 def cmd_review(args) -> int:
@@ -992,7 +1080,15 @@ def cmd_review(args) -> int:
 
 
 def run_session(queue: list[tuple]) -> int:
-    """One pass over the queue, navigable. Grades are held until the session ends."""
+    """One pass over the queue, navigable. Grades are held until the session ends.
+
+    Two modes, because reading and being tested are different activities and doing both in
+    one screen means doing neither well. **learn** shows everything at once and grades
+    nothing: it is for building the picture, or meeting what an update just changed.
+    **test** hides the answer until you have had a go, and is the only one that moves a
+    card's box. `l` switches mid-session, because realising you do not know an area is
+    exactly when you want to stop testing and start reading.
+    """
     roots = {e["name"]: Path(e["root"]).expanduser() for e, *_ in queue}
     kinds = {c["id"]: kind_of(c) for _, c, *_ in queue}
     revealed: set[int] = set()
@@ -1041,23 +1137,23 @@ def run_session(queue: list[tuple]) -> int:
 def draw_card(queue, i, kind, root, cs, revealed, grade) -> None:
     entry, card, _state, _deck, _churn = queue[i]
     cols, rows = shutil.get_terminal_size((90, 24))
-    width = min(cols, 100)
-    inner = width - 4
+    # Wrap to the widest the box may ever be, then shrink the box to what the text used.
+    inner = max(MIN_WIDTH, min(TARGET_WIDTH, cols - 2)) - 4
 
     repo = entry["name"]
     accent = name_colour(repo)
     pri = priority_of(card)
-    siblings = tuple((_deck.get("topics") or {}).keys())
+    siblings = tuple(all_topics(_deck).keys())
     topics = topics_of(card, _deck)
 
     head = f"{accent}{repo}{C['reset']}"
     for t in topics[:2]:
-        head += f" {topic_colour(t, siblings)}\u258c{t}{C['reset']}"
-    head += f" {C['dim']}\u00b7{C['reset']} {sgr(KIND_COLOUR[kind])}{kind_label(kind)}{C['reset']}"
+        head += f" {topic_colour(t, siblings)}▌{t}{C['reset']}"
+    head += f" {C['dim']}·{C['reset']} {sgr(KIND_COLOUR[kind])}{kind_label(kind)}{C['reset']}"
 
     head_right = (f"{C['dim']}{i + 1}/{len(queue)}{C['reset']}  "
                   f"{sgr(BOX_COLOUR[cs['box']])}box {cs['box']}{C['reset']}  "
-                  f"{sgr(PRIORITY_COLOUR[pri])}{'\u2605' * (4 - pri)}{C['reset']}")
+                  f"{sgr(PRIORITY_COLOUR[pri])}{'★' * (4 - pri)}{C['reset']}")
 
     body: list[str] = [""] + render_prompt(card, kind, inner - 2, root) + [""]
     if revealed:
@@ -1074,10 +1170,10 @@ def draw_card(queue, i, kind, root, cs, revealed, grade) -> None:
     for block in body:
         flat.extend(block.split("\n"))
 
-    keys = ("\u2190/\u2192 \u00b7 enter reveal \u00b7 q quit" if not revealed
-            else "\u2190/\u2192 \u00b7 y got it \u00b7 n missed \u00b7 q quit")
-    mark = {"y": f"{sgr(114)}\u2713 got it{C['reset']}",
-            "n": f"{sgr(203)}\u2717 missed{C['reset']}"}.get(grade, "")
+    keys = ("←/→ · enter reveal · q quit" if not revealed
+            else "←/→ · y got it · n missed · q quit")
+    mark = {"y": f"{sgr(114)}✓ got it{C['reset']}",
+            "n": f"{sgr(203)}✗ missed{C['reset']}"}.get(grade, "")
     foot = f"{C['dim']}{keys}{C['reset']}" + (f"  {mark}" if mark else "")
 
     # Trim from the middle padding rather than the content if the card is taller than the
@@ -1090,12 +1186,12 @@ def draw_card(queue, i, kind, root, cs, revealed, grade) -> None:
     # removal is rewriting is exactly how the rule ended up under the answer.
     divider = flat.index(DIVIDER) if DIVIDER in flat else None
     flat = [ln for ln in flat if ln != DIVIDER]
+    width = fit_width(flat, cols, f"{head} {head_right}", foot)
     boxed = frame(flat, width, head=head, head_right=head_right,
                   foot=foot, border=f"{C['dim']}{accent}", divider_at=divider)
 
-    pad = max(0, rows - len(boxed) - 1)
     sys.stdout.write("\033[H\033[J" if FULLSCREEN else "\n")
-    sys.stdout.write("\n".join(boxed) + "\n" * (pad + 1))
+    sys.stdout.write(place(boxed, cols, rows, centre=FULLSCREEN) + "\n")
     sys.stdout.flush()
 
 
@@ -1159,6 +1255,11 @@ def finish_session(queue, graded: dict[int, str]) -> int:
           f" of {len(queue)} shown{C['reset']}")
     if wrong:
         print(f"{C['dim']}Missed cards are back in box 1 and due tomorrow.{C['reset']}")
+    stale = sorted({e["name"] for e, *_ in queue
+                    if (d := deck_summary(e)) and d.get("behind")})
+    if stale:
+        print(f"{C['yellow']}⟳{C['reset']} {', '.join(stale)} moved since the deck was written. "
+              f"{C['dim']}Run{C['reset']} /repo-cards:update")
     return 0
 
 
@@ -1190,7 +1291,12 @@ def cmd_stats(args) -> int:
             if is_due(cs):
                 due += 1
         bar = "  ".join(f"{'▁▃▅▆█'[b - 1]} box{b} {C['dim']}{boxes[b]}{C['reset']}" for b in range(1, MAX_BOX + 1))
-        print(f"\n{C['bold']}{entry['name']}{C['reset']}  {C['dim']}{len(cards)} cards, {deck.get('last_update_sha', '?')}{C['reset']}")
+        head = git(Path(entry["root"]).expanduser(), "rev-parse", "--short", "HEAD")
+        sha = deck.get("last_update_sha", "?")
+        stale = (f"  {C['yellow']}⟳ repo at {head} · /repo-cards:update{C['reset']}"
+                 if head and sha != "?" and head != sha else "")
+        print(f"\n{C['bold']}{entry['name']}{C['reset']}  "
+              f"{C['dim']}{len(cards)} cards, {sha}{C['reset']}{stale}")
         print(f"  {C['yellow']}{due} due{C['reset']}, {unseen} never seen")
         print(f"  {bar}")
         pri = collections.Counter(priority_of(c) for c in cards)
@@ -1417,7 +1523,7 @@ def cmd_topics(args) -> int:
         if loaded is None:
             continue
         deck, _cards = loaded
-        topics = deck.get("topics") or {}
+        topics = all_topics(deck)
         if not topics:
             print(f"\n{C['bold']}{entry['name']}{C['reset']}  {C['dim']}no topics defined{C['reset']}")
             continue
