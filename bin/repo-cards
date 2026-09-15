@@ -1217,8 +1217,6 @@ def draw_card(queue, i, kind, root, cs, revealed, grade, mode="test") -> None:
     topics = topics_of(card, _deck)
 
     head = f"{accent}{repo}{C['reset']}"
-    for t in topics[:2]:
-        head += f" {topic_colour(t, siblings)}▌{t}{C['reset']}"
     shown_kind = "learn" if mode == "learn" else kind_label(kind)
     kind_col = sgr(214 if mode == "learn" else KIND_COLOUR[kind])
     head += f" {C['dim']}·{C['reset']} {kind_col}{shown_kind}{C['reset']}"
@@ -1227,30 +1225,38 @@ def draw_card(queue, i, kind, root, cs, revealed, grade, mode="test") -> None:
                   f"{sgr(BOX_COLOUR[cs['box']])}box {cs['box']}{C['reset']}  "
                   f"{sgr(PRIORITY_COLOUR[pri])}{'★' * (4 - pri)}{C['reset']}")
 
-    body: list[str] = [""] + render_prompt(card, kind, inner - 2, root) + [""]
+    body: list[str] = [""]
+    if topics:
+        body.append("  " + "  ".join(
+            f"{topic_colour(t, siblings)}▌{t}{C['reset']}" for t in topics[:3]))
+        body.append("")
+    body += render_prompt(card, kind, inner - 2, root) + [""]
     if revealed:
         body += [DIVIDER, ""] + render_answer(card, kind, inner - 2, root) + [""]
         anchor = str(card.get("anchor", "-"))
         body += [f"  {C['dim']}anchor{C['reset']}  {link(anchor, root, anchor)}", ""]
-
-    tags = "  ".join(f"{tag_colour(t)}#{t}{C['reset']}" for t in card.get("tags", []))
-    if tags:
-        body += [f"  {tags}", ""]
 
     # Wrapped lines arrive as one string per block; split so the frame pads each row.
     flat: list[str] = []
     for block in body:
         flat.extend(block.split("\n"))
 
+    def hint(key: str, label: str, colour: int) -> str:
+        return f"{sgr(colour)}{key}{C['reset']} {C['dim']}{label}{C['reset']}"
+
+    nav = hint("←/→", "move", 117)
+    quit_ = hint("q", "quit", 245)
     if mode == "learn":
-        keys = "←/→ move · l test · q quit"
+        parts = [nav, hint("l", "test", 214), quit_]
     elif not revealed:
-        keys = "←/→ · enter reveal · l learn · q quit"
+        parts = [nav, hint("enter", "reveal", 109), hint("l", "learn", 214), quit_]
     else:
-        keys = "←/→ · y got it · n missed · l learn · q quit"
+        parts = [nav, hint("y", "got it", 114), hint("n", "missed", 203),
+                 hint("l", "learn", 214), quit_]
+    keys = f" {C['dim']}·{C['reset']} ".join(parts)
     mark = {"y": f"{sgr(114)}✓ got it{C['reset']}",
             "n": f"{sgr(203)}✗ missed{C['reset']}"}.get(grade, "")
-    foot = f"{C['dim']}{keys}{C['reset']}" + (f"  {mark}" if mark else "")
+    foot = keys + (f"  {mark}" if mark else "")
 
     # Trim from the middle padding rather than the content if the card is taller than the
     # terminal: losing a blank line is invisible, losing the answer is not.
@@ -1428,7 +1434,8 @@ def drift_facts(entry: dict) -> dict:
     """Everything drift knows about one repo, before deciding how much of it to print."""
     root = Path(entry["root"]).expanduser()
     f = {"name": entry["name"], "root": root, "sha": None, "cards": [], "head": "", "log": "",
-         "changed": [], "hot": [], "cold": [], "routes": [], "dead": [], "uncovered": [], "status": ""}
+         "changed": [], "hot": [], "cold": [], "routes": [], "dead": [], "uncovered": [],
+         "status": ""}
 
     def note_dead() -> None:
         """Paths a card points at that are not in the repo any more.
