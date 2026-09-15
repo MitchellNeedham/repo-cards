@@ -504,6 +504,66 @@ def topic_colour(name: str, siblings: tuple[str, ...] = ()) -> str:
     return _TOPIC_COLOURS[key].get(name, f"\033[38;5;{_PALETTE[zlib.crc32(name.encode()) % len(_PALETTE)]}m")
 
 
+def sgr(code: int) -> str:
+    """A 256-colour foreground escape, or nothing when colour is off."""
+    return f"\033[38;5;{code}m" if C["reset"] else ""
+
+
+# Rich mode: box, priority and kind each carry their own colour, so the header reads at a
+# glance rather than being parsed.
+BOX_COLOUR = {1: 203, 2: 215, 3: 117, 4: 114, 5: 84}
+PRIORITY_COLOUR = {1: 220, 2: 109, 3: 243}
+KIND_COLOUR = {"recall": 109, "cloze": 214, "locate": 117, "order": 176}
+
+
+def tag_colour(tag: str) -> str:
+    return sgr(_PALETTE[zlib.crc32(("#" + tag).encode()) % len(_PALETTE)])
+
+
+def frame(lines: list[str], width: int, *, head: str = "", head_right: str = "",
+          foot: str = "", border: str = "", divider_at: int | None = None) -> list[str]:
+    """Wrap pre-wrapped lines in a rounded box.
+
+    Padding is computed from the *visible* width, so colour escapes and OSC 8 hyperlinks
+    do not push the right edge out. A line that is still too wide is truncated rather than
+    allowed to break the frame, which is the one failure that makes the whole screen wrong.
+    """
+    b, r = border, C["reset"] if border else ""
+    inner = width - 4
+    out = []
+
+    def bar(left: str, right: str, text: str = "", text_right: str = "") -> str:
+        """A border row with text set into it.
+
+        Both labels are truncated to fit, and the right-hand one is dropped entirely before
+        the bar is allowed to overflow: a header wider than the terminal breaks every row
+        below it, which is far more wrong than a missing card count.
+        """
+        mid = width - 2                 # columns between the two corners
+        min_rule = 2                    # at least one dash each side of the text
+        tail = f" {text_right} \u2500" if text_right else ""
+        head = f"\u2500 {text} " if text else ""
+
+        if visible_len(head) + visible_len(tail) + min_rule > mid:
+            tail = ""                   # the count is the first thing to go
+        if visible_len(head) + min_rule > mid:
+            head = f"\u2500 {ansi_truncate(text, max(0, mid - min_rule - 3))}\u2026 "
+
+        room = max(0, mid - visible_len(head) - visible_len(tail))
+        return f"{b}{left}{r}{head}{b}{'\u2500' * room}{r}{tail}{b}{right}{r}"
+
+    out.append(bar("\u256d", "\u256e", head, head_right))
+    for i, ln in enumerate(lines):
+        if divider_at is not None and i == divider_at:
+            out.append(f"{b}\u251c{'\u2500' * (width - 2)}\u2524{r}")
+        vis = visible_len(ln)
+        if vis > inner:
+            ln, vis = ansi_truncate(ln, inner), inner
+        out.append(f"{b}\u2502{r} {ln}{' ' * (inner - vis)} {b}\u2502{r}")
+    out.append(bar("\u2570", "\u256f", foot))
+    return out
+
+
 def link(text: str, root: Path, path: str) -> str:
     """`text` as an OSC 8 hyperlink to path, when the terminal can do it."""
     if not HYPERLINKS:
@@ -611,13 +671,19 @@ def render_prompt(card: dict, kind: str, width: int, root: Path) -> list[str]:
     return out
 
 
-def route_lines(card: dict, root: Path, width: int, arrow: str = "→") -> list[str]:
+def route_lines(card: dict, root: Path, width: int) -> list[str]:
+    """One route per path, its description wrapped underneath rather than trailing it.
+
+    A path plus a description rarely fits on one line, and truncating it loses the half
+    that says why the path is worth opening.
+    """
     out = []
-    for n, (pth, what) in enumerate(look_entries(card)):
-        head = f"  {'look:' if n == 0 else '     '} {arrow} "
-        shown = link(pth, root, pth)
-        tail = f"  {what}" if what else ""
-        out.append(f"{C['dim']}{head}{C['reset']}{shown}{C['dim']}{tail}{C['reset']}")
+    for pth, what in look_entries(card):
+        chunks = hard_break(pth, width - 4)
+        out.append(f"{C['dim']}  \u2192 {C['reset']}{link(chunks[0], root, pth)}")
+        out += [f"    {link(ch, root, pth)}" for ch in chunks[1:]]
+        if what:
+            out.append(f"{C['dim']}{wrap(what, width, '    ')}{C['reset']}")
     return out
 
 
@@ -726,13 +792,16 @@ def pick_session(args) -> dict[str, set[str] | None] | None:
             sys.stdout.flush()
 
 
-def _frame(title: str, rows_out: list[str], keys: str) -> None:
+def _frame(title: str, rows_out: list[str], keys: str, accent: str = "") -> None:
+    """The picker, in the same box as a card, so the two do not look like different apps."""
     cols, rows = shutil.get_terminal_size((90, 24))
-    body = [title, ""] + rows_out
-    body += [""] * max(0, rows - len(body) - 2)
-    body.append(f"{C['dim']}{keys}{C['reset']}")
+    width = min(cols, 100)
+    body = [""] + rows_out + [""]
+    body = body[: max(1, rows - 4)]
+    boxed = frame(body, width, head=title, foot=f"{C['dim']}{keys}{C['reset']}",
+                  border=f"{C['dim']}{accent}")
     sys.stdout.write("\033[H\033[J" if FULLSCREEN else "\n")
-    sys.stdout.write("\n".join(body[: rows - 1]) + "\n")
+    sys.stdout.write("\n".join(boxed) + "\n" * max(1, rows - len(boxed)))
     sys.stdout.flush()
 
 
@@ -810,6 +879,10 @@ def picked_rows(args, chosen: dict[str, set[str] | None]) -> list[tuple]:
 # --- review ------------------------------------------------------------------
 
 ALT_ON, ALT_OFF = "\033[?1049h\033[?25l", "\033[?1049l\033[?25h"
+
+#: Marks where the rule between question and answer goes. A sentinel rather than an index,
+#: because the height trim rewrites the list underneath it.
+DIVIDER = "\x00rule\x00"
 
 
 def session_rows(args) -> list[tuple]:
@@ -901,49 +974,93 @@ def draw_card(queue, i, kind, root, cs, revealed, grade) -> None:
     entry, card, _state, _deck, _churn = queue[i]
     cols, rows = shutil.get_terminal_size((90, 24))
     width = min(cols, 100)
-    body_width = width - 2
+    inner = width - 4
 
-    name = f"{name_colour(entry['name'])}{entry['name']}{C['reset']}"
-    star = "★" * (4 - priority_of(card))
-    topics = topics_of(card, _deck)
+    repo = entry["name"]
+    accent = name_colour(repo)
+    pri = priority_of(card)
     siblings = tuple((_deck.get("topics") or {}).keys())
-    topic_bit = ("".join(f" {topic_colour(t, siblings)}▌{t}{C['reset']}" for t in topics[:2])
-                 if topics else "")
-    left = (f" {name}{topic_bit} {C['dim']}·{C['reset']} "
-            f"{C['yellow']}{kind_label(kind)}{C['reset']}")
-    right = f"{C['dim']}{i + 1}/{len(queue)} · box {cs['box']} · {star}{C['reset']}"
-    pad = max(1, width - visible_len(left) - visible_len(right))
+    topics = topics_of(card, _deck)
 
-    body = render_prompt(card, kind, body_width, root)
+    head = f"{accent}{repo}{C['reset']}"
+    for t in topics[:2]:
+        head += f" {topic_colour(t, siblings)}\u258c{t}{C['reset']}"
+    head += f" {C['dim']}\u00b7{C['reset']} {sgr(KIND_COLOUR[kind])}{kind_label(kind)}{C['reset']}"
+
+    head_right = (f"{C['dim']}{i + 1}/{len(queue)}{C['reset']}  "
+                  f"{sgr(BOX_COLOUR[cs['box']])}box {cs['box']}{C['reset']}  "
+                  f"{sgr(PRIORITY_COLOUR[pri])}{'\u2605' * (4 - pri)}{C['reset']}")
+
+    body: list[str] = [""] + render_prompt(card, kind, inner - 2, root) + [""]
     if revealed:
-        body += ["", f"{C['dim']}{'─' * (width - 4)}{C['reset']}", ""]
-        body += render_answer(card, kind, body_width, root)
+        body += [DIVIDER, ""] + render_answer(card, kind, inner - 2, root) + [""]
         anchor = str(card.get("anchor", "-"))
-        body += ["", f"{C['dim']}  anchor: {C['reset']}{link(anchor, root, anchor)}"]
+        body += [f"  {C['dim']}anchor{C['reset']}  {link(anchor, root, anchor)}", ""]
 
-    tags = " ".join(f"{C['dim']}#{t}{C['reset']}" for t in card.get("tags", []))
-    keys = ("←/→ move · enter reveal · q quit" if not revealed
-            else "←/→ move · y got it · n missed · q quit")
-    mark = {"y": f"{C['green']}✓ got it{C['reset']}", "n": f"{C['red']}✗ missed{C['reset']}"}.get(grade, "")
+    tags = "  ".join(f"{tag_colour(t)}#{t}{C['reset']}" for t in card.get("tags", []))
+    if tags:
+        body += [f"  {tags}", ""]
 
-    lines = [left + " " * pad + right, ""]
-    lines += "\n".join(body).split("\n")
-    used = len(lines) + 3
-    lines += [""] * max(0, rows - used - 1)
-    lines.append(f"{tags}")
-    lines.append(f"{C['dim']}{keys}{C['reset']}" + (f"   {mark}" if mark else ""))
+    # Wrapped lines arrive as one string per block; split so the frame pads each row.
+    flat: list[str] = []
+    for block in body:
+        flat.extend(block.split("\n"))
 
+    keys = ("\u2190/\u2192 \u00b7 enter reveal \u00b7 q quit" if not revealed
+            else "\u2190/\u2192 \u00b7 y got it \u00b7 n missed \u00b7 q quit")
+    mark = {"y": f"{sgr(114)}\u2713 got it{C['reset']}",
+            "n": f"{sgr(203)}\u2717 missed{C['reset']}"}.get(grade, "")
+    foot = f"{C['dim']}{keys}{C['reset']}" + (f"  {mark}" if mark else "")
+
+    # Trim from the middle padding rather than the content if the card is taller than the
+    # terminal: losing a blank line is invisible, losing the answer is not.
+    budget = rows - 3
+    while len(flat) > budget and "" in flat:
+        flat.remove("")
+    flat = flat[:budget]
+    # Located after trimming, never tracked through it: an index into a list that blank-line
+    # removal is rewriting is exactly how the rule ended up under the answer.
+    divider = flat.index(DIVIDER) if DIVIDER in flat else None
+    flat = [ln for ln in flat if ln != DIVIDER]
+    boxed = frame(flat, width, head=head, head_right=head_right,
+                  foot=foot, border=f"{C['dim']}{accent}", divider_at=divider)
+
+    pad = max(0, rows - len(boxed) - 1)
     sys.stdout.write("\033[H\033[J" if FULLSCREEN else "\n")
-    sys.stdout.write("\n".join(lines[: rows - 1]) + "\n")
+    sys.stdout.write("\n".join(boxed) + "\n" * (pad + 1))
     sys.stdout.flush()
 
 
 # SGR colour codes and OSC 8 hyperlink wrappers both occupy no columns.
-_INVISIBLE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]|\x1b\]8;;[^\x1b]*\x1b\\")
+_INVISIBLE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\]8;;[^\x1b]*\x1b\\")
 
 
 def visible_len(text: str) -> int:
     return len(_INVISIBLE.sub("", text))
+
+
+def ansi_truncate(text: str, limit: int) -> str:
+    """Cut to `limit` visible columns without severing an escape sequence.
+
+    Slicing by character index is wrong once a hyperlink wraps the text, because the
+    escapes are no longer all at the front: the cut lands inside one and the terminal
+    swallows the rest of the line.
+    """
+    out, vis, i = [], 0, 0
+    while i < len(text) and vis < limit:
+        if text[i] == "\x1b" and (mt := _INVISIBLE.match(text, i)):
+            out.append(mt.group())
+            i = mt.end()
+            continue
+        out.append(text[i])
+        vis += 1
+        i += 1
+    return "".join(out) + C["reset"]
+
+
+def hard_break(text: str, width: int) -> list[str]:
+    """Split a token with no spaces in it, so a long path cannot burst the frame."""
+    return [text[i:i + width] for i in range(0, len(text), width)] or [""]
 
 
 def finish_session(queue, graded: dict[int, str]) -> int:
