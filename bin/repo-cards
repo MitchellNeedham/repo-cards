@@ -123,6 +123,28 @@ def deck_path(name: str) -> Path:
     return deck_dir(name) / "deck.yaml"
 
 
+def prefs_path() -> Path:
+    return data_home() / "session.json"
+
+
+def load_prefs() -> dict:
+    """What you picked last time. Preferences, not data: losing them costs one keypress."""
+    p = prefs_path()
+    if not p.exists():
+        return {}
+    try:
+        return json.loads(p.read_text())
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def save_prefs(**changes) -> None:
+    prefs = {**load_prefs(), **changes}
+    p = prefs_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(prefs, indent=2, sort_keys=True) + "\n")
+
+
 def state_file(name: str) -> Path:
     return deck_dir(name) / "state.json"
 
@@ -873,9 +895,13 @@ def pick_session(args) -> dict[str, set[str] | None] | None:
         if undecked:
             print(f"{C['dim']}Registered and waiting: {', '.join(undecked)}{C['reset']}")
         return None
-    # Pre-select whatever has work waiting, so enter on an untouched picker does the
-    # obvious thing rather than nothing.
-    chosen: dict[str, set[str] | None] = {d["entry"]["name"]: None for d in decks if d["due"]}
+    # Last session's choice, so coming back lands where you left off. Falls back to
+    # whatever has work waiting, so a first run does the obvious thing on enter.
+    live = {d["entry"]["name"] for d in decks}
+    remembered = {k: (set(v) if v else None)
+                  for k, v in (load_prefs().get("selected") or {}).items() if k in live}
+    chosen: dict[str, set[str] | None] = remembered or {
+        d["entry"]["name"]: None for d in decks if d["due"]}
     if not chosen:
         chosen = {decks[0]["entry"]["name"]: None}
 
@@ -913,7 +939,7 @@ def pick_session(args) -> dict[str, set[str] | None] | None:
                 elif key == "right" and decks[row]["topics"]:
                     view, topic_row, topic_off = "topics", 0, 0
                 elif key == "enter":
-                    return chosen or None
+                    return remember(chosen)
             else:
                 d = decks[row]
                 opts = ["all", *d["topics"]]
@@ -938,7 +964,7 @@ def pick_session(args) -> dict[str, set[str] | None] | None:
                         cur = (cur - {t}) if t in cur else (cur | {t})
                         chosen[name] = cur or None
                 elif key == "enter":
-                    return chosen or None
+                    return remember(chosen)
     finally:
         if FULLSCREEN:
             sys.stdout.write(ALT_OFF)
@@ -962,6 +988,14 @@ def scroll_window(count: int, cursor: int, offset: int, height: int, margin: int
         offset = cursor - height + 1 + margin
     offset = max(0, min(offset, count - height))
     return offset, offset, min(count, offset + height)
+
+
+def remember(chosen: dict[str, set[str] | None]) -> dict | None:
+    """Persist the picker's answer so the next session starts where this one did."""
+    if not chosen:
+        return None
+    save_prefs(selected={k: sorted(v) if v else None for k, v in chosen.items()})
+    return chosen
 
 
 def _frame(title: str, rows_out: list[str], keys: str, accent: str = "") -> None:
@@ -1163,6 +1197,7 @@ def run_session(queue: list[tuple], mode: str = "test") -> int:
     graded: dict[int, str] = {}
     i = 0
 
+    save_prefs(mode=mode)
     if FULLSCREEN:
         sys.stdout.write(ALT_ON)
     try:
@@ -1177,6 +1212,7 @@ def run_session(queue: list[tuple], mode: str = "test") -> int:
                 break
             if key == "l":
                 mode = "learn" if mode == "test" else "test"
+                save_prefs(mode=mode)
             elif key == "left":
                 i = max(0, i - 1)
             elif key == "right":
@@ -1779,7 +1815,7 @@ def main() -> int:
     # `learn` and `test` are review with the mode chosen up front.
     if args.command in ("learn", "test"):
         args.mode, args.command = args.command, "review"
-    args.mode = args.mode or "test"
+    args.mode = args.mode or load_prefs().get("mode", "test")
     return {
         "review": cmd_review, "brief": cmd_brief, "topics": cmd_topics,
         "stats": cmd_stats, "list": cmd_list, "drift": cmd_drift,
