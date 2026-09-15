@@ -268,8 +268,10 @@ Then, in order:
 8. Re-validate and report: verified, rewritten, retired, added, topics touched, one line of
    reasoning each. Short enough to read in a minute.
 
-If the deck has drifted a long way (hundreds of commits), say so and offer a regenerate rather than
-pretending an incremental pass covered it.
+`drift` decides this for you rather than leaving it to judgement: past roughly 60 commits, or once
+a quarter of the cards point at paths that no longer exist, it reports that the deck has drifted far
+enough that a regenerate beats verifying it card by card. Say so and offer `/repo-cards:generate`
+rather than pretending an incremental pass covered it.
 
 ## Reviewing
 

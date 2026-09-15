@@ -78,6 +78,12 @@ PICKER_WIDTH = 104
 MIN_WIDTH = 44
 
 
+# When a deck is this far behind, an incremental update is the wrong tool: verifying a
+# hundred anchors one at a time is slower than rereading the repo, and a deck that has
+# drifted that far is usually missing whole areas rather than a few facts.
+REGEN_COMMITS = 60
+REGEN_DEAD_FRACTION = 0.25
+
 CHURN_WINDOW_DAYS = 180
 CHURN_FLOOR = 3
 CHURN_WEIGHT = 0.5
@@ -1471,7 +1477,7 @@ def drift_facts(entry: dict) -> dict:
     root = Path(entry["root"]).expanduser()
     f = {"name": entry["name"], "root": root, "sha": None, "cards": [], "head": "", "log": "",
          "changed": [], "hot": [], "cold": [], "routes": [], "dead": [], "uncovered": [],
-         "status": ""}
+         "status": "", "regen": False}
 
     def note_dead() -> None:
         """Paths a card points at that are not in the repo any more.
@@ -1538,6 +1544,10 @@ def drift_facts(entry: dict) -> dict:
         if touched:
             f["routes"].append((c, touched))
 
+    behind_n = len(f["log"].splitlines())
+    dead_frac = len({cid for cid, _ in f["dead"]}) / max(1, len(cards))
+    f["regen"] = behind_n > REGEN_COMMITS or dead_frac > REGEN_DEAD_FRACTION
+
     covered = {pth for c in cards for pth in all_paths(c)}
     f["uncovered"] = [x for x in f["changed"] if x not in covered]
     return f
@@ -1565,6 +1575,9 @@ def print_drift_detail(f: dict) -> None:
     print(f"\n--- commits since {f['sha']} ({len(f['log'].splitlines())}) ---\n{f['log']}")
     print(f"\n--- files changed ({len(f['changed'])}) ---")
     print("\n".join(f"  {x}" for x in f["changed"]) or "  (none)")
+    if f.get("regen"):
+        print(f"\n{C['yellow']}Drifted far enough that a regenerate is likely cheaper than "
+              f"verifying this card by card.{C['reset']}")
     print(f"\n--- cards whose anchor changed ({len(f['hot'])}) : VERIFY THESE ---")
     print("\n".join(f"  {c['id']:<40} {c['anchor']}" for c in f["hot"]) or "  (none)")
     if f["cold"]:
@@ -1619,8 +1632,13 @@ def cmd_drift(args) -> int:
         print(f"  {f['name']:<20} {cols[0]:>8} {cols[1]:>7} {cols[2]:>7} {dead:>5} {cols[3]:>10}   {colour}{f['status']}{C['reset']}")
 
     print()
+    regen = [f for f in facts if f.get("regen")]
     if behind:
         print(f"  {len(behind)} deck(s) behind. Detail: repo-cards drift --repo <name>   (--full for all)")
+    if regen:
+        names = ", ".join(f["name"] for f in regen)
+        print(f"  {C['yellow']}{names}: far enough behind that a regenerate beats an update"
+              f"{C['reset']}\n  {C['dim']}Ask Claude for{C['reset']} /repo-cards:generate")
     if ungenerated:
         print(f"  {len(ungenerated)} repo(s) registered with no deck: {', '.join(f['name'] for f in ungenerated)}")
         print(f"  {C['dim']}Generate one by running /repo-cards:generate from inside it.{C['reset']}")
