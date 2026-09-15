@@ -23,6 +23,7 @@ Content and scheduling state are separate files: regenerating a deck never costs
 from __future__ import annotations
 
 import argparse
+import collections
 import datetime as dt
 import json
 import os
@@ -38,6 +39,28 @@ import yaml
 # Leitner box -> days until due again. Box 5 is "known", not "finished".
 INTERVALS = {1: 1, 2: 2, 3: 4, 4: 8, 5: 16}
 MAX_BOX = 5
+
+# Ordering weights. Priority decides what you see first in a capped session; it deliberately
+# does NOT touch the intervals above, so a card you demonstrably know still backs off to 16
+# days however load-bearing it is.
+#
+# JITTER is wider than the gap between tiers on purpose: a priority-2 card can beat a
+# priority-1 card on any given day, so the order varies and you are not drilling the same
+# fifteen in the same sequence forever.
+#
+# OVERDUE_PER_DAY is the starvation guard, and it is not optional. Simulated over 180 days
+# at 15 cards a day across eight decks (~640 cards), a weighted order with no escalation
+# left 455 cards never seen at all: the tail cannot out-rank 185 foundational cards, ever.
+# A gentle slope with a high cap fixes it without flattening the weighting, because a card
+# only overtakes a tier after weeks of neglect rather than days. The same simulation puts
+# the starvation cliff just above a 1.0 tier gap, so the gap here stays well clear of it.
+PRIORITY_WEIGHT = {1: 0.0, 2: 0.6, 3: 1.2}
+DEFAULT_PRIORITY = 2
+JITTER = 1.4
+RECENT_DAYS = 30        # a card added or rewritten this recently is still bedding in
+RECENT_BOOST = 0.6
+OVERDUE_PER_DAY = 0.05
+OVERDUE_CAP = 3.5
 
 C = {
     "dim": "\033[2m", "bold": "\033[1m", "reset": "\033[0m",
@@ -107,10 +130,11 @@ def save_registry(repos: list[dict]) -> None:
     p.write_text(json.dumps({"repos": repos}, indent=2) + "\n")
 
 
-def load_deck(entry: dict) -> tuple[dict, list[dict]] | None:
+def load_deck(entry: dict, quiet: bool = False) -> tuple[dict, list[dict]] | None:
     path = deck_path(entry["name"])
     if not path.exists():
-        print(f"{C['yellow']}! no deck for {entry['name']} at {path}{C['reset']}")
+        if not quiet:
+            print(f"{C['yellow']}! no deck for {entry['name']} at {path}{C['reset']}")
         return None
     try:
         deck = yaml.safe_load(path.read_text()) or {}
@@ -147,6 +171,62 @@ def card_state(state: dict, card_id: str) -> dict:
 
 def is_due(cs: dict) -> bool:
     return dt.date.fromisoformat(cs["due"]) <= today()
+
+
+def look_entries(card: dict) -> list[tuple[str, str]]:
+    """`look` as (path[#symbol], what you would find there).
+
+    Distinct from `anchor`, which names the one place the fact is *defined* and is what
+    drift tracks precisely. `look` is the route you would take to answer the question
+    yourself: the test that pins it, the decision that argued it, the caller that shows why.
+    """
+    look = card.get("look") or {}
+    if isinstance(look, dict):
+        return [(str(k), str(v)) for k, v in look.items()]
+    # A bare list is accepted so a hand-edited card with no descriptions still works.
+    return [(str(x), "") for x in look]
+
+
+def all_paths(card: dict) -> list[str]:
+    """Every repo path a card points at, anchor first, symbols stripped."""
+    out = [str(card.get("anchor", "")).split("#")[0]]
+    out += [pth.split("#")[0] for pth, _ in look_entries(card)]
+    return [x for x in out if x]
+
+
+def priority_of(card: dict) -> int:
+    pri = card.get("priority", DEFAULT_PRIORITY)
+    return pri if pri in PRIORITY_WEIGHT else DEFAULT_PRIORITY
+
+
+def card_date(card: dict, deck: dict) -> dt.date | None:
+    """When this card last changed. Falls back to the deck's first generation.
+
+    The deck is not in git, so nothing else can answer this: `added` and `updated` are
+    written by the skill, and a card carrying neither is as old as the deck.
+    """
+    raw = card.get("updated") or card.get("added") or deck.get("generated")
+    if not raw:
+        return None
+    try:
+        return dt.date.fromisoformat(str(raw))
+    except ValueError:
+        return None
+
+
+def order_score(card: dict, deck: dict, cs: dict) -> float:
+    """Lower sorts earlier. Weighted, not absolute: see JITTER and OVERDUE_PER_DAY."""
+    score = PRIORITY_WEIGHT[priority_of(card)]
+    when = card_date(card, deck)
+    if when is not None and (today() - when).days <= RECENT_DAYS:
+        score -= RECENT_BOOST
+    try:
+        overdue = (today() - dt.date.fromisoformat(cs["due"])).days
+    except (KeyError, ValueError):
+        overdue = 0
+    if overdue > 0:
+        score -= min(overdue * OVERDUE_PER_DAY, OVERDUE_CAP)
+    return score + random.random() * JITTER
 
 
 def wanted_tags(args) -> set[str]:
@@ -196,14 +276,14 @@ def topic_cards(deck: dict, name: str) -> tuple[dict | None, list[dict], list[st
     return topic, [by_id[cid] for cid in wanted if cid in by_id], [cid for cid in wanted if cid not in by_id]
 
 
-def collect(args) -> list[tuple[dict, dict, dict]]:
-    """Gather (entry, card, state) for everything in scope. States are shared per deck."""
+def collect(args) -> list[tuple[dict, dict, dict, dict]]:
+    """Gather (entry, card, state, deck) for everything in scope. States are shared per deck."""
     out, states = [], {}
     tags, grep = wanted_tags(args), compile_grep(args.grep)
     for entry in load_registry():
         if args.repo and entry["name"] != args.repo:
             continue
-        loaded = load_deck(entry)
+        loaded = load_deck(entry, quiet=not args.repo)
         if loaded is None:
             continue
         deck, cards = loaded
@@ -216,11 +296,13 @@ def collect(args) -> list[tuple[dict, dict, dict]]:
             if not card_matches(card, tags, grep):
                 continue
             cs = card_state(state, card["id"])
+            if args.priority and priority_of(card) != args.priority:
+                continue
             if args.new and cs["seen"] > 0:
                 continue
             if not args.all and not args.new and not is_due(cs):
                 continue
-            out.append((entry, card, state))
+            out.append((entry, card, state, deck))
     return out
 
 
@@ -266,7 +348,9 @@ def cmd_review(args) -> int:
         print(f"{C['green']}Nothing due{scope}.{C['reset']} {C['dim']}--all to cram, --new for unseen.{C['reset']}")
         return 0
 
-    random.shuffle(queue)
+    # Weighted, not shuffled: load-bearing and recently-changed cards land near the front,
+    # so a capped session spends its budget on what costs most to be wrong about.
+    queue.sort(key=lambda row: order_score(row[1], row[3], card_state(row[2], row[1]["id"])))
     if args.limit:
         queue = queue[: args.limit]
 
@@ -276,10 +360,11 @@ def cmd_review(args) -> int:
 
     print(f"\n{C['bold']}{len(queue)} card(s){C['reset']} {C['dim']}[enter] reveal  y got it  n missed  s skip  q quit{C['reset']}\n")
 
-    for n, (entry, card, state) in enumerate(queue, 1):
+    for n, (entry, card, state, deck) in enumerate(queue, 1):
         cs = card_state(state, card["id"])
         print("─" * width)
-        print(f"{C['dim']}{n}/{len(queue)}  {entry['name']}  box {cs['box']}  {' '.join(card.get('tags', []))}{C['reset']}\n")
+        star = "★" * (4 - priority_of(card))
+        print(f"{C['dim']}{n}/{len(queue)}  {entry['name']}  box {cs['box']}  {star}  {' '.join(card.get('tags', []))}{C['reset']}\n")
         print(f"{C['bold']}{wrap(card['q'], width)}{C['reset']}\n")
 
         if (ans := prompt(f"{C['dim']}  [enter] reveal, s skip, q quit > {C['reset']}")) == "q":
@@ -290,7 +375,11 @@ def cmd_review(args) -> int:
             continue
 
         print(f"\n{C['cyan']}{wrap(card['a'], width)}{C['reset']}")
-        print(f"\n{C['dim']}  anchor: {card.get('anchor', '-')}{C['reset']}\n")
+        print(f"\n{C['dim']}  anchor: {card.get('anchor', '-')}{C['reset']}")
+        for n_, (pth, what) in enumerate(look_entries(card)):
+            label = "  look:  " if n_ == 0 else "         "
+            print(f"{C['dim']}{label}{pth}{('  ' + what) if what else ''}{C['reset']}")
+        print()
 
         while (grade := prompt(f"  {C['green']}y{C['reset']} got it / {C['red']}n{C['reset']} missed / s skip / q quit > ")) not in ("y", "n", "s", "q"):
             pass
@@ -339,7 +428,7 @@ def cmd_stats(args) -> int:
     for entry in repos:
         if args.repo and entry["name"] != args.repo:
             continue
-        loaded = load_deck(entry)
+        loaded = load_deck(entry, quiet=not args.repo)
         if loaded is None:
             continue
         deck, cards = loaded
@@ -360,6 +449,12 @@ def cmd_stats(args) -> int:
         print(f"\n{C['bold']}{entry['name']}{C['reset']}  {C['dim']}{len(cards)} cards, {deck.get('last_update_sha', '?')}{C['reset']}")
         print(f"  {C['yellow']}{due} due{C['reset']}, {unseen} never seen")
         print(f"  {bar}")
+        pri = collections.Counter(priority_of(c) for c in cards)
+        routed = sum(1 for c in cards if look_entries(c))
+        recent = sum(1 for c in cards if (d := card_date(c, deck)) and (today() - d).days <= RECENT_DAYS)
+        print(f"  {C['dim']}★★★ {pri[1]} foundational · ★★ {pri[2]} core · ★ {pri[3]} detail"
+              f"{f' · {recent} changed in the last {RECENT_DAYS}d' if recent else ''}{C['reset']}")
+        print(f"  {C['dim']}{routed}/{len(cards)} carry a `look` route{C['reset']}")
         lapsed = sorted(((c, s["lapses"]) for c, s in state.items() if s.get("lapses", 0) >= 2), key=lambda kv: -kv[1])[:5]
         if lapsed:
             print(f"  {C['dim']}stickiest: {', '.join(f'{c} (x{n})' for c, n in lapsed)}{C['reset']}")
@@ -371,18 +466,21 @@ def cmd_list(args) -> int:
     for entry in load_registry():
         if args.repo and entry["name"] != args.repo:
             continue
-        loaded = load_deck(entry)
+        loaded = load_deck(entry, quiet=not args.repo)
         if loaded is None:
             continue
         _deck, cards = loaded
         state = load_state(entry["name"])
         tags, grep = wanted_tags(args), compile_grep(args.grep)
-        for card in cards:
+        for card in sorted(cards, key=priority_of):
             if not card_matches(card, tags, grep):
+                continue
+            if args.priority and priority_of(card) != args.priority:
                 continue
             cs = state.get(card["id"], {"box": 1, "due": "never"})
             flag = f"{C['yellow']}due{C['reset']}" if cs["due"] == "never" or is_due(cs) else f"{C['dim']}{cs['due']}{C['reset']}"
-            print(f"  {C['dim']}box{cs['box']}{C['reset']} {flag:>22}  {card['id']:<38} {C['dim']}{','.join(card.get('tags', []))}{C['reset']}")
+            star = ("★" * (4 - priority_of(card))).ljust(3)
+            print(f"  {star} {C['dim']}box{cs['box']}{C['reset']} {flag:>22}  {card['id']:<38} {C['dim']}{','.join(card.get('tags', []))}{C['reset']}")
     return 0
 
 
@@ -395,75 +493,165 @@ def git(root: Path, *args: str) -> str:
         return ""
 
 
+def drift_facts(entry: dict) -> dict:
+    """Everything drift knows about one repo, before deciding how much of it to print."""
+    root = Path(entry["root"]).expanduser()
+    f = {"name": entry["name"], "root": root, "sha": None, "cards": [], "head": "", "log": "",
+         "changed": [], "hot": [], "cold": [], "routes": [], "dead": [], "uncovered": [], "status": ""}
+
+    def note_dead() -> None:
+        """Paths a card points at that are not in the repo any more.
+
+        Worth checking whatever the deck's sha says: a path can be wrong from the day it was
+        written, and a route that 404s teaches the reader nothing.
+        """
+        for c in f["cards"]:
+            for pth in all_paths(c):
+                if not (root / pth).exists():
+                    f["dead"].append((c["id"], pth))
+
+    loaded = load_deck(entry, quiet=True)
+    if loaded is None:
+        # Registered but never generated. A normal state, and the one the summary most needs
+        # to surface: it is the list of repos still waiting on /repo-cards:generate.
+        f["status"] = "no deck"
+        return f
+    deck, cards = loaded
+    f["cards"] = cards
+    f["sha"] = deck.get("last_update_sha")
+    sha = f["sha"]
+
+    if not root.is_dir():
+        f["status"] = "root missing"
+        return f
+    note_dead()
+    f["head"] = git(root, "rev-parse", "--short", "HEAD")
+    if not sha or not f["head"]:
+        f["status"] = "no baseline"
+        return f
+    if sha == f["head"]:
+        f["status"] = "up to date"
+        return f
+
+    f["status"] = "behind"
+    f["log"] = git(root, "log", "--oneline", f"{sha}..HEAD")
+    f["changed"] = [x for x in git(root, "diff", "--name-only", f"{sha}..HEAD").split("\n") if x]
+
+    # An anchor carrying #symbol is narrowed further: one commit to a 700-line module
+    # should not flag every card drawn from it, or the update drowns in false positives.
+    changed_set, diff_cache = set(f["changed"]), {}
+    for c in cards:
+        path, _, symbol = str(c.get("anchor", "")).partition("#")
+        if not path:
+            continue
+        if not (path in changed_set or any(x.startswith(path.rstrip("/") + "/") for x in changed_set)):
+            continue
+        if not symbol:
+            f["hot"].append(c)
+            continue
+        if path not in diff_cache:
+            diff_cache[path] = git(root, "diff", "-U5", f"{sha}..HEAD", "--", path)
+        # Hunk headers carry the enclosing function name, so a symbol absent from the
+        # whole diff was very likely not touched.
+        (f["hot"] if symbol in diff_cache[path] else f["cold"]).append(c)
+
+    hot_ids = {c["id"] for c in f["hot"]}
+    for c in cards:
+        if c["id"] in hot_ids:
+            continue
+        touched = [pth for pth, _ in look_entries(c)
+                   if pth.split("#")[0] in changed_set]
+        if touched:
+            f["routes"].append((c, touched))
+
+    covered = {pth for c in cards for pth in all_paths(c)}
+    f["uncovered"] = [x for x in f["changed"] if x not in covered]
+    return f
+
+
+def print_drift_detail(f: dict) -> None:
+    print(f"\n{C['bold']}=== {f['name']} ==={C['reset']}")
+    print(f"root: {f['root']}")
+    print(f"deck: {deck_path(f['name'])}")
+    if f["status"] == "no deck":
+        print(f"{C['yellow']}no deck yet. Generate one with /repo-cards:generate{C['reset']}")
+        return
+    print(f"deck generated at: {f['sha'] or '(unrecorded)'}")
+    if f["status"] == "root missing":
+        print(f"{C['red']}root does not exist on this machine; re-register it{C['reset']}")
+        return
+    print(f"HEAD now: {f['head'] or '(not a git repo)'}")
+    if f["status"] == "no baseline":
+        print("no baseline to diff against; treat every card as unverified")
+        return
+    if f["status"] == "up to date":
+        print(f"{C['green']}up to date, no commits since the deck was generated{C['reset']}")
+        return
+
+    print(f"\n--- commits since {f['sha']} ({len(f['log'].splitlines())}) ---\n{f['log']}")
+    print(f"\n--- files changed ({len(f['changed'])}) ---")
+    print("\n".join(f"  {x}" for x in f["changed"]) or "  (none)")
+    print(f"\n--- cards whose anchor changed ({len(f['hot'])}) : VERIFY THESE ---")
+    print("\n".join(f"  {c['id']:<40} {c['anchor']}" for c in f["hot"]) or "  (none)")
+    if f["cold"]:
+        print(f"\n--- file changed but the anchored symbol was not touched ({len(f['cold'])}) : likely fine ---")
+        print("\n".join(f"  {c['id']:<40} {c['anchor']}" for c in f["cold"]))
+    if f["routes"]:
+        print(f"\n--- cards whose `look` route changed ({len(f['routes'])}) : directions may be stale ---")
+        for c, touched in f["routes"]:
+            print(f"  {c['id']:<40} {', '.join(touched)}")
+    if f["dead"]:
+        print(f"\n--- paths that no longer exist ({len(f['dead'])}) : FIX THESE ---")
+        for cid, pth in f["dead"]:
+            print(f"  {cid:<40} {pth}")
+    print(f"\n--- changed files no card points at ({len(f['uncovered'])}) : CANDIDATES ---")
+    print("\n".join(f"  {x}" for x in f["uncovered"]) or "  (none)")
+
+
 def cmd_drift(args) -> int:
-    """Report what changed since a deck was generated, and which cards that touches.
+    """What changed since each deck was generated, and which cards that touches.
 
     Deliberately mechanical: it says what to look at, and the skill decides what a card
     should now say. Written to be read by Claude as well as by a person.
+
+    One repo prints in full. Every repo prints a summary instead, because eight repos of
+    detail is not a triage, and the point of a sweep is deciding where to spend the effort.
     """
-    for entry in load_registry():
-        if args.repo and entry["name"] != args.repo:
-            continue
-        loaded = load_deck(entry)
-        if loaded is None:
-            continue
-        deck, cards = loaded
-        root = Path(entry["root"]).expanduser()
-        sha = deck.get("last_update_sha")
+    entries = [e for e in load_registry() if not args.repo or e["name"] == args.repo]
+    if not entries:
+        print("No repos registered. Add one with: repo-cards register /path/to/repo")
+        return 0
 
-        print(f"\n{C['bold']}=== {entry['name']} ==={C['reset']}")
-        print(f"root: {root}")
-        print(f"deck: {deck_path(entry['name'])}")
-        print(f"deck generated at: {sha or '(unrecorded)'}")
-        if not root.is_dir():
-            print(f"{C['red']}root does not exist on this machine; re-register it{C['reset']}")
-            continue
+    facts = [drift_facts(e) for e in entries]
+    if args.repo or args.full or len(facts) == 1:
+        for f in facts:
+            print_drift_detail(f)
+        print()
+        return 0
 
-        head = git(root, "rev-parse", "--short", "HEAD")
-        print(f"HEAD now: {head or '(not a git repo)'}")
-        if not sha or not head:
-            print("no baseline to diff against; treat every card as unverified")
-            continue
-        if sha == head:
-            print(f"{C['green']}up to date, no commits since the deck was generated{C['reset']}")
-            continue
+    behind = [f for f in facts if f["status"] == "behind"]
+    ungenerated = [f for f in facts if f["status"] == "no deck"]
+    rank = {"behind": 0, "no deck": 1, "root missing": 2, "no baseline": 3, "up to date": 4}
+    colours = {"behind": C["yellow"], "up to date": C["green"], "no deck": C["dim"]}
 
-        log = git(root, "log", "--oneline", f"{sha}..HEAD")
-        changed = [f for f in git(root, "diff", "--name-only", f"{sha}..HEAD").split("\n") if f]
-        print(f"\n--- commits since {sha} ({len(log.splitlines())}) ---\n{log}")
-        print(f"\n--- files changed ({len(changed)}) ---")
-        print("\n".join(f"  {f}" for f in changed) or "  (none)")
+    print(f"\n  {'repo':<20} {'commits':>8} {'verify':>7} {'routes':>7} {'dead':>5} {'new files':>10}   state")
+    for f in sorted(facts, key=lambda x: (rank.get(x["status"], 9), -len(x["hot"]))):
+        colour = colours.get(f["status"], C["red"])
+        dead = f"{C['red']}{len(f['dead'])}{C['reset']}" if f["dead"] else "-"
+        if f["status"] == "behind":
+            cols = (str(len(f["log"].splitlines())), str(len(f["hot"])), str(len(f["routes"])), str(len(f["uncovered"])))
+        else:
+            cols = ("-", "-", "-", "-")
+        print(f"  {f['name']:<20} {cols[0]:>8} {cols[1]:>7} {cols[2]:>7} {dead:>5} {cols[3]:>10}   {colour}{f['status']}{C['reset']}")
 
-        # An anchor carrying #symbol is narrowed further: one commit to a 700-line module
-        # should not flag every card drawn from it, or the update drowns in false positives.
-        changed_set = set(changed)
-        diff_cache: dict[str, str] = {}
-        hot, cold = [], []
-        for c in cards:
-            path, _, symbol = str(c.get("anchor", "")).partition("#")
-            if not path:
-                continue
-            if not (path in changed_set or any(f.startswith(path.rstrip("/") + "/") for f in changed_set)):
-                continue
-            if not symbol:
-                hot.append(c)
-                continue
-            if path not in diff_cache:
-                diff_cache[path] = git(root, "diff", "-U5", f"{sha}..HEAD", "--", path)
-            # Hunk headers carry the enclosing function name, so a symbol absent from the
-            # whole diff was very likely not touched.
-            (hot if symbol in diff_cache[path] else cold).append(c)
-
-        print(f"\n--- cards whose anchor changed ({len(hot)}) : VERIFY THESE ---")
-        print("\n".join(f"  {c['id']:<40} {c['anchor']}" for c in hot) or "  (none)")
-        if cold:
-            print(f"\n--- file changed but the anchored symbol was not touched ({len(cold)}) : likely fine ---")
-            print("\n".join(f"  {c['id']:<40} {c['anchor']}" for c in cold))
-
-        anchored = {str(c.get("anchor", "")).split("#")[0] for c in cards}
-        uncovered = [f for f in changed if f not in anchored]
-        print(f"\n--- changed files no card is anchored to ({len(uncovered)}) : CANDIDATES ---")
-        print("\n".join(f"  {f}" for f in uncovered) or "  (none)")
+    print()
+    if behind:
+        print(f"  {len(behind)} deck(s) behind. Detail: repo-cards drift --repo <name>   (--full for all)")
+    if ungenerated:
+        print(f"  {len(ungenerated)} repo(s) registered with no deck: {', '.join(f['name'] for f in ungenerated)}")
+        print(f"  {C['dim']}Generate one by running /repo-cards:generate from inside it.{C['reset']}")
+    if not behind and not ungenerated:
+        print(f"  {C['green']}Every deck is current.{C['reset']}")
     print()
     return 0
 
@@ -476,7 +664,7 @@ def cmd_topics(args) -> int:
     for entry in load_registry():
         if args.repo and entry["name"] != args.repo:
             continue
-        loaded = load_deck(entry)
+        loaded = load_deck(entry, quiet=not args.repo)
         if loaded is None:
             continue
         deck, _cards = loaded
@@ -515,7 +703,7 @@ def cmd_brief(args) -> int:
     for entry in load_registry():
         if args.repo and entry["name"] != args.repo:
             continue
-        loaded = load_deck(entry)
+        loaded = load_deck(entry, quiet=not args.repo)
         if loaded is None:
             continue
         deck, cards = loaded
@@ -547,9 +735,15 @@ def cmd_brief(args) -> int:
         print()
 
         for n, card in enumerate(cards, 1):
-            print(f"{C['bold']}{n:>3}. {wrap(card['q'], width - 5, '').lstrip()}{C['reset']}")
+            # Wrapped at the answer's indent, then the first line's indent is replaced by the
+            # number, so continuation lines stay aligned under it instead of hitting column 0.
+            q = wrap(card["q"], width, "     ")
+            print(f"{C['bold']}{n:>3}. {q[5:]}{C['reset']}")
             print(f"{C['cyan']}{wrap(card['a'], width, '     ')}{C['reset']}")
-            print(f"{C['dim']}     {card.get('anchor', '-')}{C['reset']}\n")
+            print(f"{C['dim']}     {card.get('anchor', '-')}{C['reset']}")
+            for pth, what in look_entries(card):
+                print(f"{C['dim']}     ↳ {pth}{('  ' + what) if what else ''}{C['reset']}")
+            print()
             shown += 1
 
     if not shown:
@@ -638,6 +832,9 @@ def main() -> int:
     p.add_argument("--limit", type=int, help="cap the session length")
     p.add_argument("--all", action="store_true", help="ignore due dates (cram)")
     p.add_argument("--new", action="store_true", help="only cards never seen")
+    p.add_argument("--full", action="store_true", help="for `drift`: full detail for every repo, not a summary")
+    p.add_argument("--priority", type=int, choices=[1, 2, 3],
+                   help="only cards at this priority (1 foundational, 2 core, 3 detail)")
     args = p.parse_args()
     return {
         "review": cmd_review, "brief": cmd_brief, "topics": cmd_topics,

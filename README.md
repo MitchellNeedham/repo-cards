@@ -19,13 +19,27 @@ one that takes more than ten minutes a day gets abandoned.
 ```yaml
 - id: outbox-row-is-a-prompt
   tags: [outbox, invariant]
-  anchor: src/billing/outbox.py#enqueue
+  priority: 1                             # 1 foundational, 2 core (default), 3 detail
+  anchor: src/billing/outbox.py#enqueue   # where the fact is defined
+  look:                                   # how to go and check it yourself
+    src/billing/outbox.py#enqueue: the empty payload, and the comment arguing it
+    docs/adr/adr-7-outbox.md: the decision, and what it rejected
+    src/billing/tests/test_outbox.py: the test that pins it
   q: >-
     ADR-7: enqueue writes an empty payload. Why is the outbox row blank, and what does that make it?
   a: >-
     It makes the message a prompt, not a snapshot. The row says this invoice changed; the bytes are
     rendered at send time, so a queued payload would go out stale.
 ```
+
+**`priority` is why a short session is worth doing.** Cards are ordered by a weighted shuffle, so
+foundational and recently-changed ones land near the front without the order being identical every
+day. It never changes the review intervals: a card you know still backs off to 16 days however
+load-bearing it is.
+
+**`look` is the route, not the citation.** `anchor` names the one place the fact is defined and is
+what drift tracks. `look` is where you would go to answer the question yourself, which is what
+teaches the repo rather than the fact. Every path must exist, and `drift` reports dead ones.
 
 ## Install
 
@@ -45,20 +59,19 @@ git clone https://github.com/MitchellNeedham/repo-cards ~/code/repo-cards
 
 ## Use
 
-```bash
-repo-cards register ~/work/billing
-```
-
-Then, from Claude Code inside that repo:
+From Claude Code, inside the repo you want carded:
 
 ```
-/repo-cards:generate     # write the deck
-/repo-cards:update       # bring it back in line with what has been committed since
+/repo-cards:generate     # registers the repo and writes the deck
+/repo-cards:update       # brings it back in line with what has been committed since
 ```
 
-`update` is the one that matters. It starts from `drift` (below), verifies every card whose source
-moved, and only then considers new ones. Asking in plain words works too: *"update my repo cards"*
-reaches the same skill.
+That is the whole setup. `generate` registers the repo itself; the `repo-cards register` CLI command
+exists for scripting or for registering without generating.
+
+`update` is the one that matters. It starts from `drift`, verifies every card whose source moved,
+and only then considers new ones. With no argument it sweeps every registered repo, so coming back
+from a fortnight elsewhere is one command. Asking in plain words works too.
 
 Reviewing is yours. Boxes 1 to 5, due after 1, 2, 4, 8 and 16 days; a miss drops to box 1 rather
 than back one step, because a fact you have lost is not most of the way to known.
@@ -105,12 +118,27 @@ How a payout moves from requested to settled
      It makes the message a prompt, not a snapshot. The row says this
      invoice changed; the bytes are rendered at send time.
      src/billing/outbox.py#enqueue
+     ↳ docs/adr/adr-7-outbox.md  the decision, and what it rejected
+     ↳ src/billing/tests/test_outbox.py  the test that pins it
 ```
 
 Ad-hoc slices need no curation: `--tag outbox,retry` takes several themes and `--grep 'idempoten'`
 searches question, answer, anchor and tags. Both work on `review` and `brief`.
 
-`update` starts from `drift`, which is what keeps a deck honest:
+`drift` is the triage the update starts from, across every repo at once:
+
+```
+$ repo-cards drift
+
+  repo                  commits  verify  routes  dead  new files   state
+  billing                    12       7       3     1          4   behind
+  pondaq                      5      10       0     -         11   behind
+  hermes                      -       -       -     -          -   up to date
+  vpn                         -       -       -     -          -   no deck
+
+  2 deck(s) behind. Detail: repo-cards drift --repo <name>   (--full for all)
+  1 repo(s) registered with no deck: vpn
+```
 
 ```
 $ repo-cards drift --repo billing
@@ -126,7 +154,11 @@ deck generated at: a1b2c3d      HEAD now: 9f8e7d6
   retry-is-not-redelivery       src/billing/retry.py#schedule
 
 --- file changed but the anchored symbol was not touched (5) : likely fine ---
---- changed files no card is anchored to (3) : CANDIDATES ---
+--- cards whose `look` route changed (3) : directions may be stale ---
+--- paths that no longer exist (1) : FIX THESE ---
+  settle-is-one-way             src/billing/queue.py
+
+--- changed files no card points at (3) : CANDIDATES ---
   src/billing/webhooks.py
 ```
 
@@ -136,7 +168,7 @@ deck generated at: a1b2c3d      HEAD now: 9f8e7d6
 |---|---|
 | `repo-cards` | everything due, across every registered repo |
 | `brief` | read an area end to end, in order, writing no state |
-| `--repo N` `--tag a,b` `--grep RE` `--topic T` | narrow to a repo, themes, a search or a curated topic |
+| `--repo N` `--tag a,b` `--grep RE` `--topic T` `--priority 1` | narrow to a repo, themes, a search, a topic or a tier |
 | `--limit N` `--new` `--all` | cap the session / only unseen / ignore due dates |
 | `topics` `stats` `list` `drift` | topics defined, deck health, every card, what changed |
 | `register PATH` `forget NAME` `repos` | manage the registry |
@@ -166,5 +198,8 @@ everywhere, `repo-cards home` prints what it resolved.
   worse than a missing one because you act on it confidently. A deck that only grows starts lying.
 - **Anchors name a symbol, not just a file**, so one commit to a large module does not flag every
   card drawn from it. On a real 17-commit window: 16 cards to verify instead of 28.
+- **Priority is weighted, with a starvation guard.** A card's score also falls the longer it stays
+  overdue, so the tail cannot be permanently outranked. Simulated over 180 days at 15 cards a day
+  across eight decks, weighting alone left 455 of 640 cards never seen; with the guard, none.
 
 MIT.

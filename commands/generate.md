@@ -11,8 +11,10 @@ assumes it, and a deck written without it will be a summary rather than a deck.
 
 Then:
 
-1. `repo-cards register <repo root>` if it is not already registered (`repo-cards repos` to check),
-   and `repo-cards home` to confirm where the deck will be written. Nothing goes in the repo itself.
+1. **Register the repo yourself if it is not already** (`repo-cards repos` to check, then
+   `repo-cards register <repo root>`). The caller should not have to do this first: running this
+   command inside a fresh repo is the whole setup. `repo-cards home` shows where the deck goes.
+   Nothing is written into the repo itself.
 2. Read the repo's own orientation first: `CLAUDE.md`, `README.md`, the docs index, any ADR folder
    or decision register. That is where the load-bearing knowledge already is. Only derive it from
    code and `git log` when no such record exists.
