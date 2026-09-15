@@ -100,9 +100,11 @@ only one that moves a card's box. `repo-cards learn` shows everything at once an
 for building the picture or meeting what an update just changed. `l` switches mid-session, because
 realising you do not know an area is exactly when you want to stop testing and start reading.
 
-**A `recent` topic appears on its own** once a deck has some history: whatever was added or
-rewritten in the last week, newest first. Nobody would hand-maintain a topic whose membership turns
-over weekly, and it is the first thing you want after an update.
+**`last-week` and `last-month` appear on their own**, built from the repository's git history:
+the cards whose anchor was touched by a commit in that window, newest first. That is what you want
+when you come back after time away, and it reflects what the repo has been doing rather than when
+the deck was last edited. Either is dropped when it covers most of the deck, because a window that
+means "everything" is not a filter.
 Boxes 1 to 5, due after 1, 2, 4, 8 and 16 days; a miss drops to box 1 rather than back one step,
 because a fact you have lost is not most of the way to known.
 
