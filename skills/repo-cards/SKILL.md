@@ -122,10 +122,18 @@ Priority decides what surfaces first in a capped session; it does not change the
 so a card you demonstrably know still backs off however important it is. Recently added or rewritten
 cards get the same kind of boost, which is why `added:` and `updated:` are worth stamping.
 
+**Churn is measured, not declared.** The CLI counts commits touching each card's anchor over the
+last 180 days and boosts the ones that are moving, normalised against the deck's own distribution.
+A card anchored on a file being edited weekly is knowledge at risk; one anchored on a decision
+nobody has touched in three years is settled. There is no field for this and nothing to maintain,
+but it is a reason to **anchor on the file that actually changes** rather than a stable summary of
+it.
+
 ### look
 
-`anchor` is one path, the place the fact is *defined*, and drift tracks it precisely. `look` is the
-**route you would take to answer the question yourself**, and it is what teaches the repo rather
+`anchor` is one path, the place the fact is *defined*; drift tracks it precisely and churn is
+measured on it. `look` is the **route you would take to answer the question yourself**, and it is
+shown *under the question, before the answer*, so it can be followed, and it is what teaches the repo rather
 than the fact: the decision that argued it, the test that pins it, the caller that shows why it
 matters. Two or three entries, each saying what is there, not just where.
 

@@ -38,8 +38,9 @@ day. It never changes the review intervals: a card you know still backs off to 1
 load-bearing it is.
 
 **`look` is the route, not the citation.** `anchor` names the one place the fact is defined and is
-what drift tracks. `look` is where you would go to answer the question yourself, which is what
-teaches the repo rather than the fact. Every path must exist, and `drift` reports dead ones.
+what drift tracks. `look` is where you would go to answer the question yourself, and it is shown
+**under the question, before the answer**, so you can go and check rather than just read. Every
+path must exist, and `drift` reports dead ones.
 
 ## Install
 
@@ -115,11 +116,11 @@ How a payout moves from requested to settled
 14 card(s) · notes: ~/.local/share/repo-cards/billing/notes/payouts.md
 
   1. ADR-7: enqueue writes an empty payload. Why is the outbox row blank?
-     It makes the message a prompt, not a snapshot. The row says this
-     invoice changed; the bytes are rendered at send time.
-     src/billing/outbox.py#enqueue
+     ↳ src/billing/outbox.py#enqueue  the empty payload, and the comment arguing it
      ↳ docs/adr/adr-7-outbox.md  the decision, and what it rejected
      ↳ src/billing/tests/test_outbox.py  the test that pins it
+     It makes the message a prompt, not a snapshot. The row says this
+     invoice changed; the bytes are rendered at send time.
 ```
 
 Ad-hoc slices need no curation: `--tag outbox,retry` takes several themes and `--grep 'idempoten'`
@@ -198,6 +199,9 @@ everywhere, `repo-cards home` prints what it resolved.
   worse than a missing one because you act on it confidently. A deck that only grows starts lying.
 - **Anchors name a symbol, not just a file**, so one commit to a large module does not flag every
   card drawn from it. On a real 17-commit window: 16 cards to verify instead of 28.
+- **Churn is measured, not declared.** A card whose anchor has been edited twenty times this year
+  outranks one pointing at a decision nobody has revisited in three, because that is where being
+  wrong costs something today. One `git log` per repo, no field to maintain.
 - **Priority is weighted, with a starvation guard.** A card's score also falls the longer it stays
   overdue, so the tail cannot be permanently outranked. Simulated over 180 days at 15 cards a day
   across eight decks, weighting alone left 455 of 640 cards never seen; with the guard, none.

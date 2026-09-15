@@ -62,6 +62,16 @@ RECENT_BOOST = 0.6
 OVERDUE_PER_DAY = 0.05
 OVERDUE_CAP = 3.5
 
+# Churn. A card whose anchor is being edited every week is knowledge at risk: the code is
+# live, people are making decisions against it now, and being wrong about it costs today.
+# A card anchored on a file nobody has touched in three years is settled, and worth less of
+# a short session. Normalised against the deck's own 90th percentile, because "a lot of
+# commits" means something different in a two-month-old repo and a ten-year-old one, and
+# floored so a repo where nothing moves hands out no boosts at all.
+CHURN_WINDOW_DAYS = 180
+CHURN_FLOOR = 3
+CHURN_WEIGHT = 0.5
+
 C = {
     "dim": "\033[2m", "bold": "\033[1m", "reset": "\033[0m",
     "green": "\033[32m", "red": "\033[31m", "yellow": "\033[33m", "cyan": "\033[36m",
@@ -214,12 +224,44 @@ def card_date(card: dict, deck: dict) -> dt.date | None:
         return None
 
 
-def order_score(card: dict, deck: dict, cs: dict) -> float:
+def repo_churn(root: Path, days: int = CHURN_WINDOW_DAYS) -> dict[str, int]:
+    """Commits touching each path in the window. One git call for the whole repo."""
+    out = git(root, "log", f"--since={days} days ago", "--name-only", "--pretty=format:")
+    counts: dict[str, int] = {}
+    for line in out.split("\n"):
+        if line := line.strip():
+            counts[line] = counts.get(line, 0) + 1
+    return counts
+
+
+def churn_context(entry: dict, cards: list[dict]) -> tuple[dict[str, int], float]:
+    """Churn counts plus the deck's own 90th percentile, which is what normalises them."""
+    root = Path(entry["root"]).expanduser()
+    if not root.is_dir():
+        return {}, 0.0
+    counts = repo_churn(root)
+    vals = sorted(counts.get(str(c.get("anchor", "")).split("#")[0], 0) for c in cards)
+    p90 = vals[int(len(vals) * 0.9)] if vals else 0
+    return counts, float(p90)
+
+
+def churn_boost(card: dict, counts: dict[str, int], p90: float) -> float:
+    """How much this card's anchor is moving, as a 0..CHURN_WEIGHT bonus."""
+    if p90 <= CHURN_FLOOR:
+        return 0.0
+    n = counts.get(str(card.get("anchor", "")).split("#")[0], 0)
+    if n <= CHURN_FLOOR:
+        return 0.0
+    return CHURN_WEIGHT * min(1.0, (n - CHURN_FLOOR) / (p90 - CHURN_FLOOR))
+
+
+def order_score(card: dict, deck: dict, cs: dict, churn: tuple[dict, float] = ({}, 0.0)) -> float:
     """Lower sorts earlier. Weighted, not absolute: see JITTER and OVERDUE_PER_DAY."""
     score = PRIORITY_WEIGHT[priority_of(card)]
     when = card_date(card, deck)
     if when is not None and (today() - when).days <= RECENT_DAYS:
         score -= RECENT_BOOST
+    score -= churn_boost(card, churn[0], churn[1])
     try:
         overdue = (today() - dt.date.fromisoformat(cs["due"])).days
     except (KeyError, ValueError):
@@ -276,8 +318,8 @@ def topic_cards(deck: dict, name: str) -> tuple[dict | None, list[dict], list[st
     return topic, [by_id[cid] for cid in wanted if cid in by_id], [cid for cid in wanted if cid not in by_id]
 
 
-def collect(args) -> list[tuple[dict, dict, dict, dict]]:
-    """Gather (entry, card, state, deck) for everything in scope. States are shared per deck."""
+def collect(args) -> list[tuple[dict, dict, dict, dict, tuple]]:
+    """Gather (entry, card, state, deck, churn) in scope. State and churn are per deck."""
     out, states = [], {}
     tags, grep = wanted_tags(args), compile_grep(args.grep)
     for entry in load_registry():
@@ -292,6 +334,7 @@ def collect(args) -> list[tuple[dict, dict, dict, dict]]:
             if not cards:
                 continue
         state = states.setdefault(entry["name"], load_state(entry["name"]))
+        churn = churn_context(entry, cards)
         for card in cards:
             if not card_matches(card, tags, grep):
                 continue
@@ -302,30 +345,101 @@ def collect(args) -> list[tuple[dict, dict, dict, dict]]:
                 continue
             if not args.all and not args.new and not is_due(cs):
                 continue
-            out.append((entry, card, state, deck))
+            out.append((entry, card, state, deck, churn))
     return out
 
 
 # --- rendering ---------------------------------------------------------------
 
+LIST_MARKER = re.compile(r"^(\s*)((?:\d+[.)]|[-*\u2022])\s+)")
+
+
 def wrap(text: str, width: int, indent: str = "  ") -> str:
-    """Wrap, but leave pre-formatted lines (from YAML literal blocks) alone."""
-    lines = []
-    for para in str(text).rstrip().split("\n"):
+    """Indent and wrap, leaving deliberate layout intact.
+
+    A value written as a YAML literal block (`|-`) is multi-line because the author laid it
+    out. Reflowing a table destroys the thing that made it readable, so a multi-line value
+    is only indented, and wrapped per line if a line is genuinely too long.
+
+    A numbered or bulleted list is the exception: its items are prose that happens to be
+    numbered, so they are rejoined and refilled under a hanging indent. A table has no list
+    marker, which is what keeps the two apart.
+    """
+    raw = str(text).rstrip()
+    preformatted = "\n" in raw
+
+    def fill(para: str, hang: str, first: str | None = None) -> list[str]:
+        out, cur = [], ""
+        lead = first if first is not None else hang
+        for word in para.split():
+            if cur and len(cur) + len(word) + 1 + len(lead if not out else hang) > width:
+                out.append((lead if not out else hang) + cur)
+                cur = word
+            else:
+                cur = f"{cur} {word}".strip()
+        if cur:
+            out.append((lead if not out else hang) + cur)
+        return out
+
+    if not preformatted:
+        return "\n".join(fill(raw, indent))
+
+    if any(LIST_MARKER.match(ln) for ln in raw.split("\n")):
+        # Regroup into items, so a wrapped item does not leave orphan fragments behind.
+        items: list[tuple[str, str]] = []   # (marker prefix, text)
+        for ln in raw.split("\n"):
+            if m := LIST_MARKER.match(ln):
+                items.append((m.group(1) + m.group(2), ln[m.end():]))
+            elif items and ln.strip():
+                items[-1] = (items[-1][0], items[-1][1] + " " + ln.strip())
+            elif not ln.strip():
+                items.append(("", ""))
+        out: list[str] = []
+        for prefix, body in items:
+            if not prefix and not body:
+                out.append("")
+                continue
+            out.extend(fill(body, indent + " " * len(prefix), first=indent + prefix))
+        return "\n".join(out)
+
+    # A block can be a table with prose under it. A line carrying an internal run of two or
+    # more spaces is column alignment; consecutive prose lines are otherwise rejoined before
+    # filling, so no orphan fragments are left behind.
+    #
+    # If the block contains ANY aligned line it is treated as a table throughout and nothing
+    # is joined. A row whose first column is long enough to eat its own padding looks like
+    # prose to this test, and merging a table row into a paragraph is far worse than leaving
+    # a short line where a fill would have tidied it.
+    def aligned(ln: str) -> bool:
+        return "  " in ln.strip()
+
+    if any(aligned(ln) for ln in raw.split("\n") if ln.strip()):
+        # Emitted verbatim even when a row is wider than the terminal. Filling it would
+        # collapse the padding that makes it a table, and a soft-wrapped row still carries
+        # its data; a reflowed one does not.
+        return "\n".join(indent + ln if ln.strip() else "" for ln in raw.split("\n"))
+
+    lines, buf = [], []
+
+    def flush() -> None:
+        if buf:
+            lines.extend(fill(" ".join(buf), indent))
+            buf.clear()
+
+    for para in raw.split("\n"):
         if not para.strip():
+            flush()
             lines.append("")
-        elif len(para) + len(indent) <= width and para != para.strip():
-            lines.append(indent + para)
+        elif aligned(para):
+            flush()
+            if len(para) + len(indent) <= width:
+                lines.append(indent + para)
+            else:
+                lead = " " * (len(para) - len(para.lstrip()))
+                lines.extend(fill(para, indent + lead))
         else:
-            cur = ""
-            for word in para.split():
-                if cur and len(cur) + len(word) + 1 + len(indent) > width:
-                    lines.append(indent + cur)
-                    cur = word
-                else:
-                    cur = f"{cur} {word}".strip()
-            if cur:
-                lines.append(indent + cur)
+            buf.append(para.strip())
+    flush()
     return "\n".join(lines)
 
 
@@ -350,7 +464,7 @@ def cmd_review(args) -> int:
 
     # Weighted, not shuffled: load-bearing and recently-changed cards land near the front,
     # so a capped session spends its budget on what costs most to be wrong about.
-    queue.sort(key=lambda row: order_score(row[1], row[3], card_state(row[2], row[1]["id"])))
+    queue.sort(key=lambda row: order_score(row[1], row[3], card_state(row[2], row[1]["id"]), row[4]))
     if args.limit:
         queue = queue[: args.limit]
 
@@ -360,12 +474,19 @@ def cmd_review(args) -> int:
 
     print(f"\n{C['bold']}{len(queue)} card(s){C['reset']} {C['dim']}[enter] reveal  y got it  n missed  s skip  q quit{C['reset']}\n")
 
-    for n, (entry, card, state, deck) in enumerate(queue, 1):
+    for n, (entry, card, state, deck, _churn) in enumerate(queue, 1):
         cs = card_state(state, card["id"])
         print("─" * width)
         star = "★" * (4 - priority_of(card))
         print(f"{C['dim']}{n}/{len(queue)}  {entry['name']}  box {cs['box']}  {star}  {' '.join(card.get('tags', []))}{C['reset']}\n")
         print(f"{C['bold']}{wrap(card['q'], width)}{C['reset']}\n")
+        # Under the question, not under the answer: the point is that you could go and find
+        # it, which only helps before the answer is on screen.
+        for n_, (pth, what) in enumerate(look_entries(card)):
+            label = "  look:  " if n_ == 0 else "         "
+            print(f"{C['dim']}{label}{pth}{('  ' + what) if what else ''}{C['reset']}")
+        if look_entries(card):
+            print()
 
         if (ans := prompt(f"{C['dim']}  [enter] reveal, s skip, q quit > {C['reset']}")) == "q":
             break
@@ -375,11 +496,7 @@ def cmd_review(args) -> int:
             continue
 
         print(f"\n{C['cyan']}{wrap(card['a'], width)}{C['reset']}")
-        print(f"\n{C['dim']}  anchor: {card.get('anchor', '-')}{C['reset']}")
-        for n_, (pth, what) in enumerate(look_entries(card)):
-            label = "  look:  " if n_ == 0 else "         "
-            print(f"{C['dim']}{label}{pth}{('  ' + what) if what else ''}{C['reset']}")
-        print()
+        print(f"\n{C['dim']}  anchor: {card.get('anchor', '-')}{C['reset']}\n")
 
         while (grade := prompt(f"  {C['green']}y{C['reset']} got it / {C['red']}n{C['reset']} missed / s skip / q quit > ")) not in ("y", "n", "s", "q"):
             pass
@@ -455,6 +572,11 @@ def cmd_stats(args) -> int:
         print(f"  {C['dim']}★★★ {pri[1]} foundational · ★★ {pri[2]} core · ★ {pri[3]} detail"
               f"{f' · {recent} changed in the last {RECENT_DAYS}d' if recent else ''}{C['reset']}")
         print(f"  {C['dim']}{routed}/{len(cards)} carry a `look` route{C['reset']}")
+        counts, p90 = churn_context(entry, cards)
+        hot = sorted(((churn_boost(c, counts, p90), c) for c in cards), key=lambda kv: -kv[0])[:3]
+        if hot and hot[0][0] > 0:
+            names = ", ".join(c["id"] for b, c in hot if b > 0)
+            print(f"  {C['dim']}anchors moving most ({CHURN_WINDOW_DAYS}d): {names}{C['reset']}")
         lapsed = sorted(((c, s["lapses"]) for c, s in state.items() if s.get("lapses", 0) >= 2), key=lambda kv: -kv[1])[:5]
         if lapsed:
             print(f"  {C['dim']}stickiest: {', '.join(f'{c} (x{n})' for c, n in lapsed)}{C['reset']}")
@@ -739,11 +861,9 @@ def cmd_brief(args) -> int:
             # number, so continuation lines stay aligned under it instead of hitting column 0.
             q = wrap(card["q"], width, "     ")
             print(f"{C['bold']}{n:>3}. {q[5:]}{C['reset']}")
-            print(f"{C['cyan']}{wrap(card['a'], width, '     ')}{C['reset']}")
-            print(f"{C['dim']}     {card.get('anchor', '-')}{C['reset']}")
-            for pth, what in look_entries(card):
+            for pth, what in look_entries(card) or [(card.get("anchor", "-"), "")]:
                 print(f"{C['dim']}     ↳ {pth}{('  ' + what) if what else ''}{C['reset']}")
-            print()
+            print(f"{C['cyan']}{wrap(card['a'], width, '     ')}{C['reset']}\n")
             shown += 1
 
     if not shown:
