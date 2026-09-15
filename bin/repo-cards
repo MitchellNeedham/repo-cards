@@ -559,7 +559,9 @@ def fit_width(lines: list[str], cols: int, *chrome: str) -> int:
     """
     content = max((visible_len(ln) for ln in lines), default=0)
     needed = max(content, max((visible_len(c) for c in chrome), default=0)) + 4
-    return max(MIN_WIDTH, min(needed, TARGET_WIDTH, cols - 2))
+    # The terminal is clamped last, on purpose: a box wider than the screen breaks every
+    # row, so a cramped card on a 40-column terminal beats a broken one.
+    return min(max(MIN_WIDTH, min(needed, TARGET_WIDTH)), max(20, cols - 2))
 
 
 def place(boxed: list[str], cols: int, rows: int, centre: bool = True) -> str:
@@ -1140,7 +1142,7 @@ def draw_card(queue, i, kind, root, cs, revealed, grade, mode="test") -> None:
     entry, card, _state, _deck, _churn = queue[i]
     cols, rows = shutil.get_terminal_size((90, 24))
     # Wrap to the widest the box may ever be, then shrink the box to what the text used.
-    inner = max(MIN_WIDTH, min(TARGET_WIDTH, cols - 2)) - 4
+    inner = min(max(MIN_WIDTH, min(TARGET_WIDTH, cols - 2)), max(20, cols - 2)) - 4
 
     repo = entry["name"]
     accent = name_colour(repo)
