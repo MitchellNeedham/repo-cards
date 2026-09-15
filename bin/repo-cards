@@ -612,6 +612,11 @@ def read_key() -> str:
         final = seq[-1] if seq else ""
         if seq.startswith(("[", "O")) and final in "ABCD":
             return {"A": "up", "B": "down", "C": "right", "D": "left"}[final]
+        if final == "~":
+            return {"5": "pgup", "6": "pgdn", "1": "home", "4": "end",
+                    "7": "home", "8": "end"}.get(seq[1:2], "esc")
+        if seq.startswith(("[", "O")) and final in "HF":
+            return {"H": "home", "F": "end"}[final]
         return "esc"
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, saved)
@@ -747,14 +752,15 @@ def pick_session(args) -> dict[str, set[str] | None] | None:
         chosen = {decks[0]["entry"]["name"]: None}
 
     row, view, topic_row = 0, "repos", 0
+    repo_off = topic_off = 0
     if FULLSCREEN:
         sys.stdout.write(ALT_ON)
     try:
         while True:
             if view == "repos":
-                draw_repo_picker(decks, chosen, row)
+                repo_off = draw_repo_picker(decks, chosen, row, repo_off)
             else:
-                draw_topic_picker(decks[row], chosen, topic_row)
+                topic_off = draw_topic_picker(decks[row], chosen, topic_row, topic_off)
             key = read_key()
 
             if key in ("q", "esc"):
@@ -762,16 +768,22 @@ def pick_session(args) -> dict[str, set[str] | None] | None:
                     view, key = "repos", ""
                 else:
                     return None
+            page = max(1, picker_height() - 1)
             if view == "repos":
                 if key == "up":
                     row = (row - 1) % len(decks)
                 elif key == "down":
                     row = (row + 1) % len(decks)
+                elif key in ("pgup", "home", "g"):
+                    row = 0 if key in ("home", "g") else max(0, row - page)
+                elif key in ("pgdn", "end", "G"):
+                    row = (len(decks) - 1 if key in ("end", "G")
+                           else min(len(decks) - 1, row + page))
                 elif key == " ":
                     name = decks[row]["entry"]["name"]
                     chosen.pop(name, None) if name in chosen else chosen.update({name: None})
                 elif key == "right" and decks[row]["topics"]:
-                    view, topic_row = "topics", 0
+                    view, topic_row, topic_off = "topics", 0, 0
                 elif key == "enter":
                     return chosen or None
             else:
@@ -781,6 +793,11 @@ def pick_session(args) -> dict[str, set[str] | None] | None:
                     topic_row = (topic_row - 1) % len(opts)
                 elif key == "down":
                     topic_row = (topic_row + 1) % len(opts)
+                elif key in ("pgup", "home", "g"):
+                    topic_row = 0 if key in ("home", "g") else max(0, topic_row - page)
+                elif key in ("pgdn", "end", "G"):
+                    topic_row = (len(opts) - 1 if key in ("end", "G")
+                                 else min(len(opts) - 1, topic_row + page))
                 elif key == "left":
                     view = "repos"
                 elif key == " ":
@@ -800,6 +817,25 @@ def pick_session(args) -> dict[str, set[str] | None] | None:
             sys.stdout.flush()
 
 
+def scroll_window(count: int, cursor: int, offset: int, height: int, margin: int = 1
+                  ) -> tuple[int, int, int]:
+    """Keep `cursor` inside a `height`-row window, moving `offset` as little as possible.
+
+    Minimal movement rather than re-centring: a list that jumps under the cursor every
+    keypress is harder to read than one that scrolls a line at a time. `margin` keeps a row
+    of context visible past the cursor so you can see where you are heading.
+    """
+    if count <= height:
+        return 0, 0, count
+    offset = min(offset, count - height)
+    if cursor < offset + margin:
+        offset = cursor - margin
+    elif cursor >= offset + height - margin:
+        offset = cursor - height + 1 + margin
+    offset = max(0, min(offset, count - height))
+    return offset, offset, min(count, offset + height)
+
+
 def _frame(title: str, rows_out: list[str], keys: str, accent: str = "") -> None:
     """The picker, in the same box as a card, so the two do not look like different apps."""
     cols, rows = shutil.get_terminal_size((90, 24))
@@ -813,9 +849,24 @@ def _frame(title: str, rows_out: list[str], keys: str, accent: str = "") -> None
     sys.stdout.flush()
 
 
-def draw_repo_picker(decks, chosen, row) -> None:
+def picker_height() -> int:
+    """Rows available for list items inside the frame, leaving room for the indicators."""
+    _cols, rows = shutil.get_terminal_size((90, 24))
+    return max(3, rows - 8)
+
+
+def _indicators(out: list[str], offset: int, end: int, count: int) -> list[str]:
+    above, below = offset, count - end
+    head = f" {C['dim']}\u2191 {above} more{C['reset']}" if above else ""
+    foot = f" {C['dim']}\u2193 {below} more{C['reset']}" if below else ""
+    return ([head] if head else []) + out + ([foot] if foot else [])
+
+
+def draw_repo_picker(decks, chosen, row, offset) -> int:
+    height = picker_height()
+    offset, start, end = scroll_window(len(decks), row, offset, height)
     out = []
-    for i, d in enumerate(decks):
+    for i, d in list(enumerate(decks))[start:end]:
         name = d["entry"]["name"]
         sel = name in chosen
         cursor = f"{C['bold']}❯{C['reset']}" if i == row else " "
@@ -827,15 +878,21 @@ def draw_repo_picker(decks, chosen, row) -> None:
         more = f"{C['dim']} →{C['reset']}" if d["topics"] else "  "
         out.append(f" {cursor} {box} {name_colour(name)}{name:<18}{C['reset']}"
                    f"{C['dim']}{len(d['cards']):>4} cards{C['reset']}  {due}{more}  {detail}")
-    _frame(f"{C['bold']}Which decks?{C['reset']}", out,
+    _frame(f"{C['bold']}Which decks?{C['reset']} "
+           f"{C['dim']}{len(chosen)}/{len(decks)} selected{C['reset']}",
+           _indicators(out, offset, end, len(decks)),
            "↑/↓ move · space toggle · → topics · enter start · q cancel")
+    return offset
 
 
-def draw_topic_picker(d, chosen, row) -> None:
+def draw_topic_picker(d, chosen, row, offset) -> int:
     name = d["entry"]["name"]
     scope = chosen.get(name)
+    opts = ["all", *d["topics"]]
+    height = picker_height()
+    offset, start, end = scroll_window(len(opts), row, offset, height)
     out = []
-    for i, t in enumerate(["all", *d["topics"]]):
+    for i, t in list(enumerate(opts))[start:end]:
         on = (scope is None) if t == "all" else bool(scope and t in scope)
         cursor = f"{C['bold']}❯{C['reset']}" if i == row else " "
         box = f"{C['green']}◉{C['reset']}" if on else f"{C['dim']}○{C['reset']}"
@@ -847,8 +904,11 @@ def draw_topic_picker(d, chosen, row) -> None:
             label = f"{topic_colour(t, tuple(d['topics']))}{t}{C['reset']}"
             note = f"{C['dim']}{len(cards):>3} cards  {topic.get('description', '')}{C['reset']}"
         out.append(f" {cursor} {box} {label:<34} {note}")
-    _frame(f"{name_colour(name)}{name}{C['reset']} {C['dim']}topics{C['reset']}", out,
-           "↑/↓ move · space toggle · ← back · enter start")
+    _frame(f"{name_colour(name)}{name}{C['reset']} {C['dim']}topics{C['reset']}",
+           _indicators(out, offset, end, len(opts)),
+           "↑/↓ move · space toggle · ← back · enter start",
+           accent=name_colour(name))
+    return offset
 
 
 def picked_rows(args, chosen: dict[str, set[str] | None]) -> list[tuple]:

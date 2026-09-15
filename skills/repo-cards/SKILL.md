@@ -290,7 +290,7 @@ repo-cards --no-pick        # skip the picker and take everything due
 ```
 
 Run bare in a terminal, `repo-cards` opens a picker: choose which decks to mix, and drill into any
-of them with `→` to pick topics. In the session, `←`/`→` move between cards (there is no skip),
+of them with `→` to pick topics. Both lists scroll, with paging and `home`/`end`. In the session, `←`/`→` move between cards (there is no skip),
 `enter` reveals, `y`/`n` grade. File paths are clickable where the terminal supports it.
 
 `brief` is the read-only counterpart, in deck or topic order rather than shuffled, for rebuilding a
