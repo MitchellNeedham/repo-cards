@@ -69,6 +69,15 @@ OVERDUE_CAP = 3.5
 # a short session. Normalised against the deck's own 90th percentile, because "a lot of
 # commits" means something different in a two-month-old repo and a ten-year-old one, and
 # floored so a repo where nothing moves hands out no boosts at all.
+# A card is prose, so it gets a comfortable measure rather than the whole terminal: a line
+# 160 columns wide is hard to read back to. The box then shrinks to whatever the content
+# actually needs, and is centred, so a short card on a big screen is not a wide box with a
+# lot of air in it.
+TARGET_WIDTH = 78
+PICKER_WIDTH = 104
+MIN_WIDTH = 44
+
+
 CHURN_WINDOW_DAYS = 180
 CHURN_FLOOR = 3
 CHURN_WEIGHT = 0.5
@@ -551,7 +560,7 @@ def tag_colour(tag: str) -> str:
     return sgr(_PALETTE[zlib.crc32(("#" + tag).encode()) % len(_PALETTE)])
 
 
-def fit_width(lines: list[str], cols: int, *chrome: str) -> int:
+def fit_width(lines: list[str], cols: int, *chrome: str, target: int = TARGET_WIDTH) -> int:
     """The narrowest box that holds `lines` and its chrome, within the terminal.
 
     Content first, terminal second: a box sized to the screen wastes the reader's eye on
@@ -561,7 +570,7 @@ def fit_width(lines: list[str], cols: int, *chrome: str) -> int:
     needed = max(content, max((visible_len(c) for c in chrome), default=0)) + 4
     # The terminal is clamped last, on purpose: a box wider than the screen breaks every
     # row, so a cramped card on a 40-column terminal beats a broken one.
-    return min(max(MIN_WIDTH, min(needed, TARGET_WIDTH)), max(20, cols - 2))
+    return min(max(MIN_WIDTH, min(needed, target)), max(20, cols - 2))
 
 
 def place(boxed: list[str], cols: int, rows: int, centre: bool = True) -> str:
@@ -903,7 +912,9 @@ def _frame(title: str, rows_out: list[str], keys: str, accent: str = "") -> None
     body = [""] + rows_out + [""]
     body = body[: max(1, rows - 4)]
     foot = f"{C['dim']}{keys}{C['reset']}"
-    width = fit_width(body, cols, title, foot)
+    # The picker is a list of rows, not prose, so it is not held to the reading measure:
+    # a truncated command hint is worse than a wide box.
+    width = fit_width(body, cols, title, foot, target=PICKER_WIDTH)
     boxed = frame(body, width, head=title, foot=foot, border=f"{C['dim']}{accent}")
     sys.stdout.write("\033[H\033[J" if FULLSCREEN else "\n")
     sys.stdout.write(place(boxed, cols, rows, centre=FULLSCREEN) + "\n")
@@ -929,14 +940,17 @@ def command_hints(decks, undecked) -> list[str]:
     The two slash commands are the half of this tool that is not the CLI, and the picker is
     the only place they would ever be discovered.
     """
+    # The command goes on its own line rather than trailing the subject: a narrow terminal
+    # truncates the end of a row, and the end is the half worth reading.
     out = []
     stale = [d["entry"]["name"] for d in decks if d.get("behind")]
     if stale:
-        out.append(f" {C['yellow']}⟳{C['reset']} {C['dim']}{', '.join(stale)} moved since "
-                   f"the deck was written · {C['reset']}/repo-cards:update")
+        out += [f" {C['yellow']}⟳{C['reset']} {C['dim']}{', '.join(stale[:3])} moved on{C['reset']}",
+                f"   {C['bold']}/repo-cards:update{C['reset']}"]
     if undecked:
         shown = ", ".join(undecked[:3]) + (f" +{len(undecked) - 3}" if len(undecked) > 3 else "")
-        out.append(f"   {C['dim']}no deck yet: {shown} · {C['reset']}/repo-cards:generate")
+        out += [f"   {C['dim']}no deck: {shown}{C['reset']}",
+                f"   {C['bold']}/repo-cards:generate{C['reset']}"]
     return ([""] + out) if out else []
 
 
@@ -1027,12 +1041,6 @@ def picked_rows(args, chosen: dict[str, set[str] | None]) -> list[tuple]:
 
 ALT_ON, ALT_OFF = "\033[?1049h\033[?25l", "\033[?1049l\033[?25h"
 
-# A card is prose, so it gets a comfortable measure rather than the whole terminal: a line
-# 160 columns wide is hard to read back to. The box then shrinks to whatever the content
-# actually needs, and is centred, so a short card on a big screen is not a wide box with a
-# lot of air in it.
-TARGET_WIDTH = 78
-MIN_WIDTH = 44
 
 #: Marks where the rule between question and answer goes. A sentinel rather than an index,
 #: because the height trim rewrites the list underneath it.
