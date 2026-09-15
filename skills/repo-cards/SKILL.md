@@ -291,9 +291,11 @@ repo-cards learn            # everything visible, nothing graded
 repo-cards test             # the default: answer hidden, self-graded
 ```
 
-**`recent` is a computed topic**, not one to write: cards added or rewritten in the last week,
-offered automatically once a deck has enough history for it to mean something. Stamping `added:`
-and `updated:` during an update is what feeds it.
+**`last-week` and `last-month` are computed topics**, not ones to write. Membership is "this
+card's anchor was touched by a commit in that window", read from git, newest first. They need no
+maintenance and cannot go stale, but they are a reason to **anchor on the file that actually
+changes** rather than a stable summary of it: an anchor nothing commits to will never appear in
+either.
 
 Run bare in a terminal, `repo-cards` opens a picker: choose which decks to mix, and drill into any
 of them with `→` to pick topics. Both lists scroll, with paging and `home`/`end`. In the session, `←`/`→` move between cards (there is no skip),

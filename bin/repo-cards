@@ -161,7 +161,9 @@ def load_deck(entry: dict, quiet: bool = False) -> tuple[dict, list[dict]] | Non
     except yaml.YAMLError as err:
         print(f"{C['red']}! deck for {entry['name']} does not parse: {err}{C['reset']}")
         return None
-    return deck, deck.get("cards") or []
+    cards = deck.get("cards") or []
+    deck["_computed"] = compute_topics(Path(entry["root"]).expanduser(), cards)
+    return deck, cards
 
 
 def load_state(name: str) -> dict:
@@ -313,28 +315,70 @@ def card_matches(card: dict, tags: set[str], grep) -> bool:
     return True
 
 
-RECENT_TOPIC = "recent"
-RECENT_TOPIC_DAYS = 7
+#: Computed topics, by how far back they look. The point of these is coming back after time
+#: away: what has the repo actually been doing, not what the deck last recorded.
+RECENT_WINDOWS = (("last-week", 7), ("last-month", 30))
+
+_TOUCH_CACHE: dict[tuple[str, int], dict[str, int]] = {}
 
 
-def synthetic_topics(deck: dict) -> dict:
-    """Topics computed from the deck rather than declared in it."""
-    cards = deck.get("cards") or []
-    fresh = [(d, c) for c in cards
-             if (d := card_date(c, deck)) and (today() - d).days <= RECENT_TOPIC_DAYS]
-    if not fresh or len(fresh) > 0.8 * len(cards):
+def repo_touch(root: Path, days: int) -> dict[str, int]:
+    """When each path was last touched by a commit in the window, as a unix timestamp.
+
+    One `git log` for the whole repo rather than one per card. The NUL prefix marks a
+    timestamp line: a filename can be all digits, and using that as the discriminator would
+    silently misattribute it.
+    """
+    key = (str(root), days)
+    if key in _TOUCH_CACHE:
+        return _TOUCH_CACHE[key]
+    out = git(root, "log", f"--since={days} days ago", "--name-only", "--pretty=format:%x00%ct")
+    touched: dict[str, int] = {}
+    stamp = 0
+    for line in out.split("\n"):
+        if line.startswith("\x00"):
+            stamp = int(line[1:] or 0)
+        elif line.strip():
+            touched[line.strip()] = max(touched.get(line.strip(), 0), stamp)
+    _TOUCH_CACHE[key] = touched
+    return touched
+
+
+def compute_topics(root: Path, cards: list[dict]) -> dict:
+    """Topics derived from the repository's own history rather than from the deck.
+
+    Membership is "this card's anchor was touched by a commit in the window", which is what
+    somebody means when they ask what has changed. Deriving it from the deck's own `added`
+    and `updated` stamps only ever said when the deck was last edited, which is bookkeeping
+    rather than news.
+    """
+    if not root.is_dir():
         return {}
-    fresh.sort(key=lambda dc: dc[0], reverse=True)
-    return {RECENT_TOPIC: {
-        "description": f"Added or rewritten in the last {RECENT_TOPIC_DAYS} days",
-        "cards": [c["id"] for _, c in fresh],
-        "synthetic": True,
-    }}
+    out = {}
+    for name, days in RECENT_WINDOWS:
+        touched = repo_touch(root, days)
+        hits = [(ts, c) for c in cards
+                if (ts := touched.get(str(c.get("anchor", "")).split("#")[0], 0))]
+        # A window that covers the whole deck is not a filter, and a big refactor makes that
+        # happen easily. It starts being useful when it narrows something.
+        if not hits or len(hits) > 0.8 * len(cards):
+            continue
+        hits.sort(key=lambda tc: tc[0], reverse=True)
+        out[name] = {
+            "description": f"Anchors touched by commits in the last {days} days, newest first",
+            "cards": [c["id"] for _ts, c in hits],
+            "synthetic": True,
+        }
+    return out
 
 
 def all_topics(deck: dict) -> dict:
-    """Declared topics plus computed ones. A declared topic wins on a name clash."""
-    return {**synthetic_topics(deck), **(deck.get("topics") or {})}
+    """Declared topics plus computed ones. A declared topic wins on a name clash.
+
+    The computed set is attached by `load_deck`, which is the only place that knows the
+    repo root, so every reader gets them without threading a path through.
+    """
+    return {**(deck.get("_computed") or {}), **(deck.get("topics") or {})}
 
 
 def topic_cards(deck: dict, name: str) -> tuple[dict | None, list[dict], list[str]]:
@@ -1072,7 +1116,7 @@ def topics_of(card: dict, deck: dict) -> list[str]:
     """Topics this card belongs to, declared ones first so the badge is the curated name."""
     declared = [n for n, t in (deck.get("topics") or {}).items()
                 if card["id"] in (t.get("cards") or [])]
-    computed = [n for n, t in synthetic_topics(deck).items()
+    computed = [n for n, t in (deck.get("_computed") or {}).items()
                 if card["id"] in (t.get("cards") or [])]
     return declared + computed
 
