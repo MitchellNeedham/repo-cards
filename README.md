@@ -79,13 +79,18 @@ Run `repo-cards` bare and it asks what to review: pick which decks to mix, and p
 them to choose topics within it.
 
 ```
-Which decks?
-
- ❯ ◉ analytics           77 cards    12 due →   all topics
-   ◉ pondaq              84 cards     9 due →   plan-flow, contract
-
-↑/↓ move · space toggle · → topics · enter start · q cancel
+╭─ Which decks? 2/4 selected ───────────────────────────────╮
+│                                                           │
+│  ❯ ◉ analytics      77 cards   12 due →   all topics      │
+│    ◉ pondaq         84 cards    9 due →   plan-flow       │
+│    ○ hermes         40 cards    0 due                     │
+│  ↓ 12 more                                                │
+│                                                           │
+╰─ ↑/↓ move · space toggle · → topics · enter start ────────╯
 ```
+
+Both lists scroll once they outgrow the terminal, with `page up`/`page down` and `home`/`end`
+(or `g`/`G`).
 
 Then one card fills the terminal. `←`/`→` move between cards, `enter` reveals, `y`/`n` grade.
 Boxes 1 to 5, due after 1, 2, 4, 8 and 16 days; a miss drops to box 1 rather than back one step,
