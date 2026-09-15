@@ -318,17 +318,10 @@ RECENT_TOPIC_DAYS = 7
 
 
 def synthetic_topics(deck: dict) -> dict:
-    """Topics computed from the deck rather than declared in it.
-
-    `recent` is the one that matters in practice: after an update you want to meet what
-    just changed, and nobody is going to hand-maintain a topic whose membership turns over
-    every week. Ordered newest first, because that is the order you care about it in.
-    """
+    """Topics computed from the deck rather than declared in it."""
     cards = deck.get("cards") or []
     fresh = [(d, c) for c in cards
              if (d := card_date(c, deck)) and (today() - d).days <= RECENT_TOPIC_DAYS]
-    # A freshly generated deck is entirely "recent", and a topic that means everything is
-    # not a filter. It starts being useful once the deck has some history behind it.
     if not fresh or len(fresh) > 0.8 * len(cards):
         return {}
     fresh.sort(key=lambda dc: dc[0], reverse=True)
@@ -395,7 +388,7 @@ def collect(args) -> list[tuple[dict, dict, dict, dict, tuple]]:
 LIST_MARKER = re.compile(r"^(\s*)((?:\d+[.)]|[-*•])\s+)")
 
 
-def wrap(text: str, width: int, indent: str = "  ") -> str:
+def wrap(text: str, width: int, indent: str = "  ", style: str = "") -> str:
     """Indent and wrap, leaving deliberate layout intact.
 
     A value written as a YAML literal block (`|-`) is multi-line because the author laid it
@@ -408,6 +401,24 @@ def wrap(text: str, width: int, indent: str = "  ") -> str:
     """
     raw = str(text).rstrip()
     preformatted = "\n" in raw
+
+    def restyle(lines: list[str]) -> str:
+        """Open and close the style on every line.
+
+        A block styled as one string keeps its escape open across the line breaks, so the
+        frame's border and padding are drawn inside it and every continuation line after
+        the first loses the style when the reset finally lands.
+        """
+        if not style:
+            return "\n".join(lines)
+        out = []
+        for ln in lines:
+            if not ln.strip():
+                out.append(ln)
+                continue
+            lead = len(ln) - len(ln.lstrip())
+            out.append(ln[:lead] + style + ln[lead:] + C["reset"])
+        return "\n".join(out)
 
     def fill(para: str, hang: str, first: str | None = None) -> list[str]:
         out, cur = [], ""
@@ -423,7 +434,7 @@ def wrap(text: str, width: int, indent: str = "  ") -> str:
         return out
 
     if not preformatted:
-        return "\n".join(fill(raw, indent))
+        return restyle(fill(raw, indent))
 
     if any(LIST_MARKER.match(ln) for ln in raw.split("\n")):
         # Regroup into items, so a wrapped item does not leave orphan fragments behind.
@@ -441,7 +452,7 @@ def wrap(text: str, width: int, indent: str = "  ") -> str:
                 out.append("")
                 continue
             out.extend(fill(body, indent + " " * len(prefix), first=indent + prefix))
-        return "\n".join(out)
+        return restyle(out)
 
     # A block can be a table with prose under it. A line carrying an internal run of two or
     # more spaces is column alignment; consecutive prose lines are otherwise rejoined before
@@ -458,7 +469,7 @@ def wrap(text: str, width: int, indent: str = "  ") -> str:
         # Emitted verbatim even when a row is wider than the terminal. Filling it would
         # collapse the padding that makes it a table, and a soft-wrapped row still carries
         # its data; a reflowed one does not.
-        return "\n".join(indent + ln if ln.strip() else "" for ln in raw.split("\n"))
+        return restyle([indent + ln if ln.strip() else "" for ln in raw.split("\n")])
 
     lines, buf = [], []
 
@@ -481,7 +492,7 @@ def wrap(text: str, width: int, indent: str = "  ") -> str:
         else:
             buf.append(para.strip())
     flush()
-    return "\n".join(lines)
+    return restyle(lines)
 
 
 # --- terminal ----------------------------------------------------------------
@@ -604,13 +615,15 @@ def frame(lines: list[str], width: int, *, head: str = "", head_right: str = "",
         """
         mid = width - 2                 # columns between the two corners
         min_rule = 2                    # at least one dash each side of the text
-        tail = f" {text_right} ─" if text_right else ""
-        head = f"─ {text} " if text else ""
+        # The stub dashes are part of the border, so they carry the border's colour. They
+        # used to be built into the text and came out in the default foreground.
+        tail = f" {text_right} {b}─{r}" if text_right else ""
+        head = f"{b}─{r} {text} " if text else ""
 
         if visible_len(head) + visible_len(tail) + min_rule > mid:
             tail = ""                   # the count is the first thing to go
         if visible_len(head) + min_rule > mid:
-            head = f"─ {ansi_truncate(text, max(0, mid - min_rule - 3))}… "
+            head = f"{b}─{r} {ansi_truncate(text, max(0, mid - min_rule - 3))}… "
 
         room = max(0, mid - visible_len(head) - visible_len(tail))
         return f"{b}{left}{r}{head}{b}{'─' * room}{r}{tail}{b}{right}{r}"
@@ -726,16 +739,17 @@ def render_prompt(card: dict, kind: str, width: int, root: Path) -> list[str]:
     """The lines shown before the reveal."""
     out: list[str] = []
     if kind == "locate":
-        out.append(f"{C['bold']}{wrap('Where in the repo would you go to answer this, and what is in each place?', width)}{C['reset']}")
+        out.append(wrap("Where in the repo would you go to answer this, and what is in each place?",
+                        width, style=C["bold"]))
         out.append("")
-        out.append(f"{C['dim']}{wrap(card['q'], width)}{C['reset']}")
+        out.append(wrap(card["q"], width, style=C["dim"]))
         return out
 
-    out.append(f"{C['bold']}{wrap(card['q'], width)}{C['reset']}")
+    out.append(wrap(card["q"], width, style=C["bold"]))
 
     if kind == "cloze":
         blanked = CLOZE.sub(lambda m: "▁" * max(6, min(len(m.group(1)), 18)), str(card["a"]))
-        out += ["", f"{C['cyan']}{wrap(blanked, width)}{C['reset']}"]
+        out += ["", wrap(blanked, width, style=C["cyan"])]
     elif kind == "order":
         shuffled = list(card.get("sequence") or [])
         random.shuffle(shuffled)
@@ -759,7 +773,7 @@ def route_lines(card: dict, root: Path, width: int) -> list[str]:
         out.append(f"{C['dim']}  → {C['reset']}{link(chunks[0], root, pth)}")
         out += [f"    {link(ch, root, pth)}" for ch in chunks[1:]]
         if what:
-            out.append(f"{C['dim']}{wrap(what, width, '    ')}{C['reset']}")
+            out.append(wrap(what, width, "    ", style=C["dim"]))
     return out
 
 
@@ -767,17 +781,17 @@ def render_answer(card: dict, kind: str, width: int, root: Path) -> list[str]:
     out: list[str] = []
     if kind == "locate":
         out += route_lines(card, root, width)
-        out += ["", f"{C['dim']}{wrap('The answer itself:', width)}{C['reset']}",
-                f"{C['cyan']}{wrap(card['a'], width)}{C['reset']}"]
+        out += ["", wrap("The answer itself:", width, style=C["dim"]),
+                wrap(card["a"], width, style=C["cyan"])]
         return out
     if kind == "order":
         out += [f"{C['cyan']}  {n}. {step}{C['reset']}" for n, step in enumerate(card.get("sequence") or [], 1)]
         if card.get("a"):
-            out += ["", f"{C['dim']}{wrap(card['a'], width)}{C['reset']}"]
+            out += ["", wrap(card["a"], width, style=C["dim"])]
         return out
 
     text = CLOZE.sub(lambda m: f"{C['bold']}{m.group(1)}{C['reset']}{C['cyan']}", str(card["a"]))
-    out.append(f"{C['cyan']}{wrap(text, width)}{C['reset']}")
+    out.append(wrap(text, width, style=C["cyan"]))
     if kind != "cloze" and not look_entries(card):
         return out
     if kind == "cloze" and look_entries(card):
