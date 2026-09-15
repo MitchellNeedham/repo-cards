@@ -49,8 +49,16 @@ git clone https://github.com/MitchellNeedham/repo-cards ~/code/repo-cards
 repo-cards register ~/work/billing
 ```
 
-Then in that repo ask Claude **"generate repo cards"**. After work lands, **"update my repo cards"**,
-which verifies existing cards against the diff before adding anything.
+Then, from Claude Code inside that repo:
+
+```
+/repo-cards:generate     # write the deck
+/repo-cards:update       # bring it back in line with what has been committed since
+```
+
+`update` is the one that matters. It starts from `drift` (below), verifies every card whose source
+moved, and only then considers new ones. Asking in plain words works too: *"update my repo cards"*
+reaches the same skill.
 
 Reviewing is yours. Boxes 1 to 5, due after 1, 2, 4, 8 and 16 days; a miss drops to box 1 rather
 than back one step, because a fact you have lost is not most of the way to known.
