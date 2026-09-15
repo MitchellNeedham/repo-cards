@@ -10,6 +10,10 @@ working across many repositories. Reviewed on a Leitner schedule by the `repo-ca
 
 The deck is not a summary of the repo. It is the set of facts where **being wrong is expensive**.
 
+**This file is the shared reference.** `/repo-cards:generate` and `/repo-cards:update` are the
+entry points and both load it first; the two Mode sections below are their workflows. Reached
+directly (someone asks in plain words), work out which mode they mean and follow it.
+
 ## The command
 
 Everything mechanical is done by `repo-cards`, installed on PATH by this plugin's `install.sh`.
