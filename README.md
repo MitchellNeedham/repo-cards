@@ -13,8 +13,9 @@ Not a summary. The facts where **being wrong is expensive**. The test applied to
 > If I believed the opposite of this, what would it cost me?
 
 If the answer is not "a defect, a reopened decision, or a lost hour", it belongs in a document.
-Anything `grep` answers in ten seconds is excluded on purpose. Decks run 60 to 80 cards, because
-one that takes more than ten minutes a day gets abandoned.
+Anything `grep` answers in ten seconds is excluded on purpose. A deck is as big as the number of
+cards that clear the bar, and no bigger; ordering is what keeps a large one reviewable in ten
+minutes rather than a size cap.
 
 ```yaml
 - id: outbox-row-is-a-prompt
@@ -74,30 +75,49 @@ exists for scripting or for registering without generating.
 and only then considers new ones. With no argument it sweeps every registered repo, so coming back
 from a fortnight elsewhere is one command. Asking in plain words works too.
 
-Reviewing is yours. Boxes 1 to 5, due after 1, 2, 4, 8 and 16 days; a miss drops to box 1 rather
-than back one step, because a fact you have lost is not most of the way to known.
+Run `repo-cards` bare and it asks what to review: pick which decks to mix, and press `→` on any of
+them to choose topics within it.
 
 ```
-$ repo-cards --limit 3
+Which decks?
 
-3 card(s)  [enter] reveal  y got it  n missed  s skip  q quit
-──────────────────────────────────────────────────────────────────
-1/3  billing  box 2  outbox invariant
+ ❯ ◉ analytics           77 cards    12 due →   all topics
+   ◉ pondaq              84 cards     9 due →   plan-flow, contract
 
-  ADR-7: enqueue writes an empty payload. Why is the outbox row
-  blank, and what does that make it?
+↑/↓ move · space toggle · → topics · enter start · q cancel
+```
 
-  [enter] reveal, s skip, q quit >
+Then one card fills the terminal. `←`/`→` move between cards, `enter` reveals, `y`/`n` grade.
+Boxes 1 to 5, due after 1, 2, 4, 8 and 16 days; a miss drops to box 1 rather than back one step,
+because a fact you have lost is not most of the way to known.
 
-  It makes the message a prompt, not a snapshot. The row says this
-  invoice changed; the bytes are rendered at send time.
+```
+ billing ▌payouts · recall                        4/22 · box 2 · ★★★
+
+  ADR-7: enqueue writes an empty payload. Why is the outbox row blank,
+  and what does that make it?
+
+  look: → src/billing/outbox.py#enqueue  the empty payload, and the comment
+        → docs/adr/adr-7-outbox.md  the decision, and what it rejected
+
+  ─────────────────────────────────────────────────────────────────
+
+  It makes the message a prompt, not a snapshot. The row says this invoice
+  changed; the bytes are rendered at send time.
 
   anchor: src/billing/outbox.py#enqueue
 
-  y got it / n missed / s skip / q quit > y
-──────────────────────────────────────────────────────────────────
-2 right, 1 missed, 0 skipped  (67%)
+#outbox #invariant
+←/→ move · y got it · n missed · q quit
 ```
+
+Repo and topic each get a stable colour, hashed from the name and de-collided so no two you have
+registered look alike. Paths are clickable in terminals that support hyperlinks.
+
+**Not every card is a plain question.** `cloze` blanks out the load-bearing words, `order` shuffles
+a sequence for you to re-order, and `locate` asks *where you would look* and treats the routes as
+the answer. A recall card with good routes is asked that way about one time in six, so the variety
+costs no authoring.
 
 Meeting tomorrow on one feature? `brief` reads an area end to end, in the order that tells the
 story, and **writes no state**, so a cram does not reschedule cards you already know:

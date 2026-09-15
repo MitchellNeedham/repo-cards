@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import collections
 import datetime as dt
+import zlib
 import json
 import os
 import random
@@ -443,6 +444,111 @@ def wrap(text: str, width: int, indent: str = "  ") -> str:
     return "\n".join(lines)
 
 
+# --- terminal ----------------------------------------------------------------
+
+FULLSCREEN = sys.stdout.isatty() and sys.stdin.isatty()
+# Terminals that do not understand OSC 8 print the text and drop the escape, so this is
+# safe to emit blind. It is skipped when piped, where the escapes would be noise.
+HYPERLINKS = sys.stdout.isatty() and os.environ.get("TERM") != "dumb"
+
+# Bright, saturated entries from the 256-colour cube: readable on a dark terminal and
+# distinguishable from each other. Near-greys are excluded, since two repos that look the
+# same defeat the point.
+_PALETTE = (38, 40, 42, 44, 46, 48, 50, 72, 74, 76, 78, 80, 82, 84, 86, 104, 106, 110, 112, 114, 116, 118, 120, 122, 140, 142, 147, 149, 153, 155, 157, 159, 171, 173, 175, 177, 179, 183, 185, 190)
+_ASSIGNED: dict[str, str] = {}
+
+
+def name_colour(name: str) -> str:
+    """A stable colour per name, de-collided against the repos actually registered.
+
+    Hashed, so a repo keeps its colour across machines and across sessions. Resolved in
+    sorted order against the registry so two registered repos never share one; adding a
+    repo only shifts a colour if it lands on a taken slot.
+    """
+    if not C["reset"]:
+        return ""
+    if not _ASSIGNED:
+        used: set[int] = set()
+        for n in sorted({r["name"] for r in load_registry()} | {name}):
+            base = zlib.crc32(n.encode()) % len(_PALETTE)
+            for k in range(len(_PALETTE)):
+                idx = (base + k) % len(_PALETTE)
+                if idx not in used:
+                    used.add(idx)
+                    _ASSIGNED[n] = f"\033[38;5;{_PALETTE[idx]}m"
+                    break
+    if name not in _ASSIGNED:
+        _ASSIGNED[name] = f"\033[38;5;{_PALETTE[zlib.crc32(name.encode()) % len(_PALETTE)]}m"
+    return _ASSIGNED[name]
+
+
+_TOPIC_COLOURS: dict[tuple, dict[str, str]] = {}
+
+
+def topic_colour(name: str, siblings: tuple[str, ...] = ()) -> str:
+    """A stable colour per topic, de-collided against the other topics in its deck."""
+    if not C["reset"]:
+        return ""
+    key = tuple(sorted(siblings)) or (name,)
+    if key not in _TOPIC_COLOURS:
+        used, out = set(), {}
+        for t in key:
+            base = zlib.crc32(("t:" + t).encode()) % len(_PALETTE)
+            for k in range(len(_PALETTE)):
+                idx = (base + k) % len(_PALETTE)
+                if idx not in used:
+                    used.add(idx)
+                    out[t] = f"\033[38;5;{_PALETTE[idx]}m"
+                    break
+        _TOPIC_COLOURS[key] = out
+    return _TOPIC_COLOURS[key].get(name, f"\033[38;5;{_PALETTE[zlib.crc32(name.encode()) % len(_PALETTE)]}m")
+
+
+def link(text: str, root: Path, path: str) -> str:
+    """`text` as an OSC 8 hyperlink to path, when the terminal can do it."""
+    if not HYPERLINKS:
+        return text
+    target = root / path.split("#")[0]
+    try:
+        uri = target.resolve().as_uri()
+    except (ValueError, OSError):
+        return text
+    return f"\033]8;;{uri}\033\\{text}\033]8;;\033\\"
+
+
+def read_key() -> str:
+    """One keypress as a name: left, right, enter, esc, or the literal character."""
+    if not FULLSCREEN:
+        try:
+            return (input() or "enter").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            return "q"
+    if sys.platform == "win32":
+        import msvcrt
+        ch = msvcrt.getwch()
+        if ch in ("\x00", "\xe0"):
+            return {"K": "left", "M": "right", "H": "up", "P": "down"}.get(msvcrt.getwch(), "")
+        return {"\r": "enter", "\x1b": "esc", "\x03": "q"}.get(ch, ch.lower())
+
+    import select
+    import termios
+    import tty
+    fd = sys.stdin.fileno()
+    old = termios.tcgetattr(fd)
+    try:
+        tty.setraw(fd)
+        ch = sys.stdin.read(1)
+        if ch == "\x1b":
+            # A bare Escape sends nothing more. Without the timeout this blocks forever.
+            if not select.select([sys.stdin], [], [], 0.05)[0]:
+                return "esc"
+            seq = sys.stdin.read(2)
+            return {"[C": "right", "[D": "left", "[A": "up", "[B": "down"}.get(seq, "esc")
+        return {"\r": "enter", "\n": "enter", "\x03": "q", "\x04": "q"}.get(ch, ch.lower())
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+
+
 def prompt(msg: str) -> str:
     try:
         return input(msg).strip().lower()
@@ -450,66 +556,403 @@ def prompt(msg: str) -> str:
         return "q"
 
 
+# --- question kinds ----------------------------------------------------------
+#
+# A deck is more interesting to review than a flat Q/A list, and the variety is not
+# decoration: asking "where would you find this" exercises a different thing from asking
+# for the fact, and it is the one that makes you learn the repo rather than the answer.
+#
+# `kind:` on a card picks one explicitly. A plain recall card that carries routes is also
+# occasionally asked as a `locate`, so the variety costs no extra authoring.
+
+CLOZE = re.compile(r"\{\{(.+?)\}\}", re.S)
+LOCATE_CHANCE = 6      # 1 in N recall cards with routes are asked as locate instead
+
+
+def kind_of(card: dict, vary: bool = True) -> str:
+    kind = str(card.get("kind", "recall")).lower()
+    if kind not in ("recall", "cloze", "locate", "order"):
+        kind = "recall"
+    if kind == "recall" and CLOZE.search(str(card.get("a", ""))):
+        kind = "cloze"          # markers present, so the author meant it
+    if (kind == "recall" and vary and len(look_entries(card)) >= 2
+            and random.randrange(LOCATE_CHANCE) == 0):
+        kind = "locate"
+    return kind
+
+
+def kind_label(kind: str) -> str:
+    return {"recall": "recall", "cloze": "fill the blanks",
+            "locate": "where would you look?", "order": "put in order"}[kind]
+
+
+def render_prompt(card: dict, kind: str, width: int, root: Path) -> list[str]:
+    """The lines shown before the reveal."""
+    out: list[str] = []
+    if kind == "locate":
+        out.append(f"{C['bold']}{wrap('Where in the repo would you go to answer this, and what is in each place?', width)}{C['reset']}")
+        out.append("")
+        out.append(f"{C['dim']}{wrap(card['q'], width)}{C['reset']}")
+        return out
+
+    out.append(f"{C['bold']}{wrap(card['q'], width)}{C['reset']}")
+
+    if kind == "cloze":
+        blanked = CLOZE.sub(lambda m: "▁" * max(6, min(len(m.group(1)), 18)), str(card["a"]))
+        out += ["", f"{C['cyan']}{wrap(blanked, width)}{C['reset']}"]
+    elif kind == "order":
+        shuffled = list(card.get("sequence") or [])
+        random.shuffle(shuffled)
+        out.append("")
+        out += [f"{C['cyan']}     {step}{C['reset']}" for step in shuffled]
+    elif look_entries(card):
+        out.append("")
+        out += route_lines(card, root, width)
+    return out
+
+
+def route_lines(card: dict, root: Path, width: int, arrow: str = "→") -> list[str]:
+    out = []
+    for n, (pth, what) in enumerate(look_entries(card)):
+        head = f"  {'look:' if n == 0 else '     '} {arrow} "
+        shown = link(pth, root, pth)
+        tail = f"  {what}" if what else ""
+        out.append(f"{C['dim']}{head}{C['reset']}{shown}{C['dim']}{tail}{C['reset']}")
+    return out
+
+
+def render_answer(card: dict, kind: str, width: int, root: Path) -> list[str]:
+    out: list[str] = []
+    if kind == "locate":
+        out += route_lines(card, root, width)
+        out += ["", f"{C['dim']}{wrap('The answer itself:', width)}{C['reset']}",
+                f"{C['cyan']}{wrap(card['a'], width)}{C['reset']}"]
+        return out
+    if kind == "order":
+        out += [f"{C['cyan']}  {n}. {step}{C['reset']}" for n, step in enumerate(card.get("sequence") or [], 1)]
+        if card.get("a"):
+            out += ["", f"{C['dim']}{wrap(card['a'], width)}{C['reset']}"]
+        return out
+
+    text = CLOZE.sub(lambda m: f"{C['bold']}{m.group(1)}{C['reset']}{C['cyan']}", str(card["a"]))
+    out.append(f"{C['cyan']}{wrap(text, width)}{C['reset']}")
+    if kind != "cloze" and not look_entries(card):
+        return out
+    if kind == "cloze" and look_entries(card):
+        out += [""] + route_lines(card, root, width)
+    return out
+
+
+# --- the picker --------------------------------------------------------------
+
+def deck_summary(entry: dict) -> dict | None:
+    """What the picker needs about one repo: its cards, topics and how many are due."""
+    loaded = load_deck(entry, quiet=True)
+    if loaded is None:
+        return None
+    deck, cards = loaded
+    state = load_state(entry["name"])
+    due = sum(1 for c in cards if (cs := state.get(c["id"])) is None or is_due(cs))
+    return {"entry": entry, "deck": deck, "cards": cards, "due": due,
+            "topics": list((deck.get("topics") or {}).keys())}
+
+
+def pick_session(args) -> dict[str, set[str] | None] | None:
+    """Choose repos, and optionally topics within them. None means the user backed out.
+
+    A value of None for a repo means every card in it; a set means those topics only.
+    """
+    decks = [d for d in (deck_summary(e) for e in load_registry()) if d]
+    if not decks:
+        print("No decks yet. Run /repo-cards:generate inside a repo.")
+        return None
+    # Pre-select whatever has work waiting, so enter on an untouched picker does the
+    # obvious thing rather than nothing.
+    chosen: dict[str, set[str] | None] = {d["entry"]["name"]: None for d in decks if d["due"]}
+    if not chosen:
+        chosen = {decks[0]["entry"]["name"]: None}
+
+    row, view, topic_row = 0, "repos", 0
+    if FULLSCREEN:
+        sys.stdout.write(ALT_ON)
+    try:
+        while True:
+            if view == "repos":
+                draw_repo_picker(decks, chosen, row)
+            else:
+                draw_topic_picker(decks[row], chosen, topic_row)
+            key = read_key()
+
+            if key in ("q", "esc"):
+                if view == "topics":
+                    view, key = "repos", ""
+                else:
+                    return None
+            if view == "repos":
+                if key == "up":
+                    row = (row - 1) % len(decks)
+                elif key == "down":
+                    row = (row + 1) % len(decks)
+                elif key == " ":
+                    name = decks[row]["entry"]["name"]
+                    chosen.pop(name, None) if name in chosen else chosen.update({name: None})
+                elif key == "right" and decks[row]["topics"]:
+                    view, topic_row = "topics", 0
+                elif key == "enter":
+                    return chosen or None
+            else:
+                d = decks[row]
+                opts = ["all", *d["topics"]]
+                if key == "up":
+                    topic_row = (topic_row - 1) % len(opts)
+                elif key == "down":
+                    topic_row = (topic_row + 1) % len(opts)
+                elif key == "left":
+                    view = "repos"
+                elif key == " ":
+                    name = d["entry"]["name"]
+                    if topic_row == 0:
+                        chosen[name] = None
+                    else:
+                        cur = chosen.get(name) or set()
+                        t = opts[topic_row]
+                        cur = (cur - {t}) if t in cur else (cur | {t})
+                        chosen[name] = cur or None
+                elif key == "enter":
+                    return chosen or None
+    finally:
+        if FULLSCREEN:
+            sys.stdout.write(ALT_OFF)
+            sys.stdout.flush()
+
+
+def _frame(title: str, rows_out: list[str], keys: str) -> None:
+    cols, rows = shutil.get_terminal_size((90, 24))
+    body = [title, ""] + rows_out
+    body += [""] * max(0, rows - len(body) - 2)
+    body.append(f"{C['dim']}{keys}{C['reset']}")
+    sys.stdout.write("\033[H\033[J" if FULLSCREEN else "\n")
+    sys.stdout.write("\n".join(body[: rows - 1]) + "\n")
+    sys.stdout.flush()
+
+
+def draw_repo_picker(decks, chosen, row) -> None:
+    out = []
+    for i, d in enumerate(decks):
+        name = d["entry"]["name"]
+        sel = name in chosen
+        cursor = f"{C['bold']}❯{C['reset']}" if i == row else " "
+        box = f"{C['green']}◉{C['reset']}" if sel else f"{C['dim']}○{C['reset']}"
+        scope = chosen.get(name)
+        detail = (f"{C['yellow']}{', '.join(sorted(scope))}{C['reset']}" if scope
+                  else f"{C['dim']}all topics{C['reset']}" if sel else "")
+        due = f"{C['yellow']}{d['due']:>4} due{C['reset']}" if d["due"] else f"{C['dim']}   0 due{C['reset']}"
+        more = f"{C['dim']} →{C['reset']}" if d["topics"] else "  "
+        out.append(f" {cursor} {box} {name_colour(name)}{name:<18}{C['reset']}"
+                   f"{C['dim']}{len(d['cards']):>4} cards{C['reset']}  {due}{more}  {detail}")
+    _frame(f"{C['bold']}Which decks?{C['reset']}", out,
+           "↑/↓ move · space toggle · → topics · enter start · q cancel")
+
+
+def draw_topic_picker(d, chosen, row) -> None:
+    name = d["entry"]["name"]
+    scope = chosen.get(name)
+    out = []
+    for i, t in enumerate(["all", *d["topics"]]):
+        on = (scope is None) if t == "all" else bool(scope and t in scope)
+        cursor = f"{C['bold']}❯{C['reset']}" if i == row else " "
+        box = f"{C['green']}◉{C['reset']}" if on else f"{C['dim']}○{C['reset']}"
+        if t == "all":
+            label, note = f"{C['dim']}everything{C['reset']}", ""
+        else:
+            topic = (d["deck"].get("topics") or {})[t]
+            _t, cards, _m = topic_cards(d["deck"], t)
+            label = f"{topic_colour(t, tuple(d['topics']))}{t}{C['reset']}"
+            note = f"{C['dim']}{len(cards):>3} cards  {topic.get('description', '')}{C['reset']}"
+        out.append(f" {cursor} {box} {label:<34} {note}")
+    _frame(f"{name_colour(name)}{name}{C['reset']} {C['dim']}topics{C['reset']}", out,
+           "↑/↓ move · space toggle · ← back · enter start")
+
+
+def picked_rows(args, chosen: dict[str, set[str] | None]) -> list[tuple]:
+    """Build the queue from a picker selection, honouring the same due/priority rules."""
+    rows, states = [], {}
+    tags, grep = wanted_tags(args), compile_grep(args.grep)
+    for entry in load_registry():
+        name = entry["name"]
+        if name not in chosen:
+            continue
+        loaded = load_deck(entry, quiet=True)
+        if loaded is None:
+            continue
+        deck, cards = loaded
+        if topics := chosen[name]:
+            wanted, seen = [], set()
+            for t in sorted(topics):
+                for c in topic_cards(deck, t)[1]:
+                    if c["id"] not in seen:
+                        seen.add(c["id"])
+                        wanted.append(c)
+            cards = wanted
+        state = states.setdefault(name, load_state(name))
+        churn = churn_context(entry, cards)
+        for card in cards:
+            if not card_matches(card, tags, grep):
+                continue
+            cs = card_state(state, card["id"])
+            if not args.all and not is_due(cs):
+                continue
+            rows.append((entry, card, state, deck, churn))
+    rows.sort(key=lambda r: order_score(r[1], r[3], card_state(r[2], r[1]["id"]), r[4]))
+    return rows[: args.limit] if args.limit else rows
+
+
 # --- review ------------------------------------------------------------------
 
-def cmd_review(args) -> int:
+ALT_ON, ALT_OFF = "\033[?1049h\033[?25l", "\033[?1049l\033[?25h"
+
+
+def session_rows(args) -> list[tuple]:
+    """The queue, ordered. One place so the picker and the flags share it."""
     queue = collect(args)
+    queue.sort(key=lambda row: order_score(row[1], row[3], card_state(row[2], row[1]["id"]), row[4]))
+    return queue[: args.limit] if args.limit else queue
+
+
+def topics_of(card: dict, deck: dict) -> list[str]:
+    return [name for name, t in (deck.get("topics") or {}).items()
+            if card["id"] in (t.get("cards") or [])]
+
+
+def cmd_review(args) -> int:
+    # The picker is the default when nothing narrows the session and there is a terminal to
+    # draw it on. Any explicit scope means the caller has already chosen.
+    scoped = any([args.repo, args.tag, args.topic, args.grep, args.priority, args.new])
+    if FULLSCREEN and not scoped and not args.no_pick:
+        chosen = pick_session(args)
+        if chosen is None:
+            return 0
+        queue = picked_rows(args, chosen)
+        if not queue:
+            print(f"{C['green']}Nothing due in that selection.{C['reset']}"
+                  f" {C['dim']}--all to cram.{C['reset']}")
+            return 0
+        return run_session(queue)
+
+    queue = session_rows(args)
     if not queue:
-        scope = f" tagged {args.tag}" if args.tag else ""
         if not load_registry():
             print("No repos registered. Add one with: repo-cards register /path/to/repo")
             return 0
+        scope = f" tagged {args.tag}" if args.tag else ""
         print(f"{C['green']}Nothing due{scope}.{C['reset']} {C['dim']}--all to cram, --new for unseen.{C['reset']}")
         return 0
+    return run_session(queue)
 
-    # Weighted, not shuffled: load-bearing and recently-changed cards land near the front,
-    # so a capped session spends its budget on what costs most to be wrong about.
-    queue.sort(key=lambda row: order_score(row[1], row[3], card_state(row[2], row[1]["id"]), row[4]))
-    if args.limit:
-        queue = queue[: args.limit]
 
-    width = min(shutil.get_terminal_size((90, 24)).columns, 96)
+def run_session(queue: list[tuple]) -> int:
+    """One pass over the queue, navigable. Grades are held until the session ends."""
+    roots = {e["name"]: Path(e["root"]).expanduser() for e, *_ in queue}
+    kinds = {c["id"]: kind_of(c) for _, c, *_ in queue}
+    revealed: set[int] = set()
+    graded: dict[int, str] = {}
+    i = 0
+
+    if FULLSCREEN:
+        sys.stdout.write(ALT_ON)
+    try:
+        while True:
+            entry, card, state, deck, _churn = queue[i]
+            cs = card_state(state, card["id"])
+            draw_card(queue, i, kinds[card["id"]], roots[entry["name"]], cs,
+                      i in revealed, graded.get(i))
+            key = read_key()
+
+            if key in ("q", "esc"):
+                break
+            if key == "left":
+                i = max(0, i - 1)
+            elif key == "right":
+                if i + 1 >= len(queue):
+                    break
+                i += 1
+            elif key == "enter":
+                if i in revealed:
+                    if i + 1 >= len(queue):
+                        break
+                    i += 1
+                else:
+                    revealed.add(i)
+            elif key in ("y", "n"):
+                revealed.add(i)
+                graded[i] = key
+                if i + 1 >= len(queue):
+                    break
+                i += 1
+    finally:
+        if FULLSCREEN:
+            sys.stdout.write(ALT_OFF)
+            sys.stdout.flush()
+
+    return finish_session(queue, graded)
+
+
+def draw_card(queue, i, kind, root, cs, revealed, grade) -> None:
+    entry, card, _state, _deck, _churn = queue[i]
+    cols, rows = shutil.get_terminal_size((90, 24))
+    width = min(cols, 100)
+    body_width = width - 2
+
+    name = f"{name_colour(entry['name'])}{entry['name']}{C['reset']}"
+    star = "★" * (4 - priority_of(card))
+    topics = topics_of(card, _deck)
+    siblings = tuple((_deck.get("topics") or {}).keys())
+    topic_bit = ("".join(f" {topic_colour(t, siblings)}▌{t}{C['reset']}" for t in topics[:2])
+                 if topics else "")
+    left = (f" {name}{topic_bit} {C['dim']}·{C['reset']} "
+            f"{C['yellow']}{kind_label(kind)}{C['reset']}")
+    right = f"{C['dim']}{i + 1}/{len(queue)} · box {cs['box']} · {star}{C['reset']}"
+    pad = max(1, width - visible_len(left) - visible_len(right))
+
+    body = render_prompt(card, kind, body_width, root)
+    if revealed:
+        body += ["", f"{C['dim']}{'─' * (width - 4)}{C['reset']}", ""]
+        body += render_answer(card, kind, body_width, root)
+        anchor = str(card.get("anchor", "-"))
+        body += ["", f"{C['dim']}  anchor: {C['reset']}{link(anchor, root, anchor)}"]
+
+    tags = " ".join(f"{C['dim']}#{t}{C['reset']}" for t in card.get("tags", []))
+    keys = ("←/→ move · enter reveal · q quit" if not revealed
+            else "←/→ move · y got it · n missed · q quit")
+    mark = {"y": f"{C['green']}✓ got it{C['reset']}", "n": f"{C['red']}✗ missed{C['reset']}"}.get(grade, "")
+
+    lines = [left + " " * pad + right, ""]
+    lines += "\n".join(body).split("\n")
+    used = len(lines) + 3
+    lines += [""] * max(0, rows - used - 1)
+    lines.append(f"{tags}")
+    lines.append(f"{C['dim']}{keys}{C['reset']}" + (f"   {mark}" if mark else ""))
+
+    sys.stdout.write("\033[H\033[J" if FULLSCREEN else "\n")
+    sys.stdout.write("\n".join(lines[: rows - 1]) + "\n")
+    sys.stdout.flush()
+
+
+# SGR colour codes and OSC 8 hyperlink wrappers both occupy no columns.
+_INVISIBLE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]|\x1b\]8;;[^\x1b]*\x1b\\")
+
+
+def visible_len(text: str) -> int:
+    return len(_INVISIBLE.sub("", text))
+
+
+def finish_session(queue, graded: dict[int, str]) -> int:
     touched: dict[str, dict] = {}
-    right = wrong = skipped = 0
-
-    print(f"\n{C['bold']}{len(queue)} card(s){C['reset']} {C['dim']}[enter] reveal  y got it  n missed  s skip  q quit{C['reset']}\n")
-
-    for n, (entry, card, state, deck, _churn) in enumerate(queue, 1):
-        cs = card_state(state, card["id"])
-        print("─" * width)
-        star = "★" * (4 - priority_of(card))
-        print(f"{C['dim']}{n}/{len(queue)}  {entry['name']}  box {cs['box']}  {star}  {' '.join(card.get('tags', []))}{C['reset']}\n")
-        print(f"{C['bold']}{wrap(card['q'], width)}{C['reset']}\n")
-        # Under the question, not under the answer: the point is that you could go and find
-        # it, which only helps before the answer is on screen.
-        for n_, (pth, what) in enumerate(look_entries(card)):
-            label = "  look:  " if n_ == 0 else "         "
-            print(f"{C['dim']}{label}{pth}{('  ' + what) if what else ''}{C['reset']}")
-        if look_entries(card):
-            print()
-
-        if (ans := prompt(f"{C['dim']}  [enter] reveal, s skip, q quit > {C['reset']}")) == "q":
-            break
-        if ans == "s":
-            skipped += 1
-            print()
-            continue
-
-        print(f"\n{C['cyan']}{wrap(card['a'], width)}{C['reset']}")
-        print(f"\n{C['dim']}  anchor: {card.get('anchor', '-')}{C['reset']}\n")
-
-        while (grade := prompt(f"  {C['green']}y{C['reset']} got it / {C['red']}n{C['reset']} missed / s skip / q quit > ")) not in ("y", "n", "s", "q"):
-            pass
-        if grade == "q":
-            break
-        if grade == "s":
-            skipped += 1
-            print()
-            continue
-
-        # Marked dirty here, not on display: quitting before grading anything should leave
-        # no state file at all, rather than one that says nothing.
+    right = wrong = 0
+    for i, grade in graded.items():
+        entry, card, state, _deck, _churn = queue[i]
         touched[entry["name"]] = state
+        cs = card_state(state, card["id"])
         cs["seen"] += 1
         cs["last_seen"] = today().isoformat()
         if grade == "y":
@@ -518,18 +961,17 @@ def cmd_review(args) -> int:
         else:
             wrong += 1
             cs["lapses"] += 1
-            cs["box"] = 1  # a fact you have lost is not most of the way to known
+            cs["box"] = 1   # a fact you have lost is not most of the way to known
         cs["due"] = (today() + dt.timedelta(days=INTERVALS[cs["box"]])).isoformat()
-        print()
-
     for name, state in touched.items():
         save_state(name, state)
 
-    graded = right + wrong
-    print("─" * width)
-    print(f"{C['bold']}{right} right, {wrong} missed, {skipped} skipped{C['reset']}"
-          f"  {C['dim']}({round(100 * right / graded)}%){C['reset']}" if graded else
-          f"{C['bold']}{skipped} skipped{C['reset']}")
+    total = right + wrong
+    if not total:
+        print(f"{C['dim']}Nothing graded, nothing rescheduled.{C['reset']}")
+        return 0
+    print(f"{C['bold']}{right} right, {wrong} missed{C['reset']}  {C['dim']}({round(100 * right / total)}%)"
+          f" of {len(queue)} shown{C['reset']}")
     if wrong:
         print(f"{C['dim']}Missed cards are back in box 1 and due tomorrow.{C['reset']}")
     return 0
@@ -952,6 +1394,8 @@ def main() -> int:
     p.add_argument("--limit", type=int, help="cap the session length")
     p.add_argument("--all", action="store_true", help="ignore due dates (cram)")
     p.add_argument("--new", action="store_true", help="only cards never seen")
+    p.add_argument("--no-pick", action="store_true",
+                   help="skip the interactive picker and review everything due")
     p.add_argument("--full", action="store_true", help="for `drift`: full detail for every repo, not a summary")
     p.add_argument("--priority", type=int, choices=[1, 2, 3],
                    help="only cards at this priority (1 foundational, 2 core, 3 detail)")

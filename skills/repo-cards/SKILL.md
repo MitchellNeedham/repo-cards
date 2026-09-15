@@ -88,10 +88,11 @@ recognition-level knowledge that belongs in a document, not a deck.
   because the same operation is called by a user, by the scheduler and by a backfill" is a card.
 * Two cards where one will do. If two facts are always recalled together, they are one card.
 
-**Sizing.** Default to **60 to 80 cards** for a substantial repo, and say so before going above it.
-A deck that cannot be reviewed in ten minutes a day gets abandoned, and an abandoned deck is worse
-than none because its staleness is invisible. A repo that only supports 20 honest cards should get
-20.
+**Sizing.** However many cards clear the bar, and no more. Do not pad a deck to a number, and do not
+stop at one: a repo that supports 30 honest cards should get 30, and one with a decade of
+load-bearing decisions can carry several hundred. The bar is the limit, not a count. Review is
+ordered by priority, churn and how overdue a card is, so a large deck stays reviewable in short
+sessions rather than demanding to be finished.
 
 ## Writing a card
 
@@ -128,6 +129,30 @@ A card anchored on a file being edited weekly is knowledge at risk; one anchored
 nobody has touched in three years is settled. There is no field for this and nothing to maintain,
 but it is a reason to **anchor on the file that actually changes** rather than a stable summary of
 it.
+
+### kind
+
+Most cards are plain recall and need no `kind:`. The others exist because asking a different shape
+of question exercises a different thing, and `locate` in particular is what makes somebody learn
+the repo rather than the answer.
+
+```yaml
+kind: cloze        # blanks are marked in the answer with {{double braces}}
+a: >-
+  The ledger is {{authoritative}}; the projection is written {{in the same transaction}}.
+
+kind: locate       # "where would you look?" - the card's `look` routes ARE the answer
+                   # needs no extra fields, but the card must carry good routes
+
+kind: order        # put the steps in sequence; shown shuffled, revealed in order
+sequence: [propose, approve, publish, apply]
+a: >-
+  Optional commentary shown under the correct order.
+```
+
+A plain recall card carrying two or more routes is also asked as `locate` about one time in six, so
+the variety costs no extra authoring. Reach for an explicit `kind:` when the shape genuinely fits:
+`cloze` for a rule with two or three load-bearing words in it, `order` for a pipeline or lifecycle.
 
 ### look
 
@@ -261,7 +286,12 @@ repo-cards --tag a,b        # several themes at once
 repo-cards --grep PATTERN   # regex over question, answer, anchor and tags
 repo-cards --topic NAME     # one curated topic, graded as usual
 repo-cards --priority 1     # drill only the foundational cards
+repo-cards --no-pick        # skip the picker and take everything due
 ```
+
+Run bare in a terminal, `repo-cards` opens a picker: choose which decks to mix, and drill into any
+of them with `→` to pick topics. In the session, `←`/`→` move between cards (there is no skip),
+`enter` reveals, `y`/`n` grade. File paths are clickable where the terminal supports it.
 
 `brief` is the read-only counterpart, in deck or topic order rather than shuffled, for rebuilding a
 mental model rather than testing it. Suggest it when somebody says they have a meeting about an
