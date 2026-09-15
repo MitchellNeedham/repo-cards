@@ -8,13 +8,16 @@
 Decks live outside the repos they describe, so nothing is written into a working tree.
 Content and scheduling state are separate files: regenerating a deck never costs progress.
 
-  repo-cards                 due cards across every registered repo
-  repo-cards --repo billing  one repo
-  repo-cards --all           ignore due dates (cram)
-  repo-cards stats           deck health and box distribution
-  repo-cards drift           what changed since a deck was last updated
-  repo-cards register PATH   add a repo
-  repo-cards home            print where everything lives
+  repo-cards                       due cards across every registered repo
+  repo-cards --repo billing        one repo
+  repo-cards --tag outbox,retry    one or more themes
+  repo-cards --all                 ignore due dates (cram)
+  repo-cards brief --topic payouts read up on one feature before a meeting
+  repo-cards topics                what topics a deck defines
+  repo-cards stats                 deck health and box distribution
+  repo-cards drift                 what changed since a deck was last updated
+  repo-cards register PATH         add a repo
+  repo-cards home                  print where everything lives
 """
 
 from __future__ import annotations
@@ -24,6 +27,7 @@ import datetime as dt
 import json
 import os
 import random
+import re
 import shutil
 import subprocess
 import sys
@@ -145,19 +149,71 @@ def is_due(cs: dict) -> bool:
     return dt.date.fromisoformat(cs["due"]) <= today()
 
 
+def wanted_tags(args) -> set[str]:
+    """--tag takes one name or a comma-separated list, matched as OR."""
+    return {t.strip() for t in (args.tag or "").split(",") if t.strip()}
+
+
+def compile_grep(pattern: str | None):
+    """--grep is a regex, falling back to a literal search when it does not compile.
+
+    A pattern like `plan(` is a typo in one reading and a literal in the other. Searching for
+    it literally is the answer nobody has to debug.
+    """
+    if not pattern:
+        return None
+    try:
+        return re.compile(pattern, re.IGNORECASE)
+    except re.error:
+        return re.compile(re.escape(pattern), re.IGNORECASE)
+
+
+def card_matches(card: dict, tags: set[str], grep) -> bool:
+    if tags and not (tags & set(card.get("tags", []))):
+        return False
+    if grep:
+        hay = " ".join([
+            card["id"], str(card.get("q", "")), str(card.get("a", "")),
+            str(card.get("anchor", "")), " ".join(card.get("tags", [])),
+        ])
+        if not grep.search(hay):
+            return False
+    return True
+
+
+def topic_cards(deck: dict, name: str) -> tuple[dict | None, list[dict], list[str]]:
+    """A topic's cards in the order the topic declares, plus any ids that no longer exist.
+
+    Order is the point: a topic is read to rebuild a mental model, and the story runs in a
+    direction. Missing ids are returned rather than skipped silently, because they mean the
+    topic outlived a card and the deck needs an update.
+    """
+    topic = (deck.get("topics") or {}).get(name)
+    if topic is None:
+        return None, [], []
+    by_id = {c["id"]: c for c in deck.get("cards") or []}
+    wanted = topic.get("cards") or []
+    return topic, [by_id[cid] for cid in wanted if cid in by_id], [cid for cid in wanted if cid not in by_id]
+
+
 def collect(args) -> list[tuple[dict, dict, dict]]:
     """Gather (entry, card, state) for everything in scope. States are shared per deck."""
     out, states = [], {}
+    tags, grep = wanted_tags(args), compile_grep(args.grep)
     for entry in load_registry():
         if args.repo and entry["name"] != args.repo:
             continue
         loaded = load_deck(entry)
         if loaded is None:
             continue
-        _deck, cards = loaded
+        deck, cards = loaded
+        if args.topic:
+            _topic, cards, _missing = topic_cards(deck, args.topic)
+            if not cards:
+                continue
         state = states.setdefault(entry["name"], load_state(entry["name"]))
         for card in cards:
-            if args.tag and args.tag not in card.get("tags", []):
+            if not card_matches(card, tags, grep):
                 continue
             cs = card_state(state, card["id"])
             if args.new and cs["seen"] > 0:
@@ -221,7 +277,6 @@ def cmd_review(args) -> int:
     print(f"\n{C['bold']}{len(queue)} card(s){C['reset']} {C['dim']}[enter] reveal  y got it  n missed  s skip  q quit{C['reset']}\n")
 
     for n, (entry, card, state) in enumerate(queue, 1):
-        touched[entry["name"]] = state
         cs = card_state(state, card["id"])
         print("─" * width)
         print(f"{C['dim']}{n}/{len(queue)}  {entry['name']}  box {cs['box']}  {' '.join(card.get('tags', []))}{C['reset']}\n")
@@ -246,6 +301,9 @@ def cmd_review(args) -> int:
             print()
             continue
 
+        # Marked dirty here, not on display: quitting before grading anything should leave
+        # no state file at all, rather than one that says nothing.
+        touched[entry["name"]] = state
         cs["seen"] += 1
         cs["last_seen"] = today().isoformat()
         if grade == "y":
@@ -318,8 +376,9 @@ def cmd_list(args) -> int:
             continue
         _deck, cards = loaded
         state = load_state(entry["name"])
+        tags, grep = wanted_tags(args), compile_grep(args.grep)
         for card in cards:
-            if args.tag and args.tag not in card.get("tags", []):
+            if not card_matches(card, tags, grep):
                 continue
             cs = state.get(card["id"], {"box": 1, "due": "never"})
             flag = f"{C['yellow']}due{C['reset']}" if cs["due"] == "never" or is_due(cs) else f"{C['dim']}{cs['due']}{C['reset']}"
@@ -409,6 +468,98 @@ def cmd_drift(args) -> int:
     return 0
 
 
+# --- brief: read up on one area, without touching the schedule ---------------
+
+def cmd_topics(args) -> int:
+    """List the curated topics each deck defines."""
+    found = False
+    for entry in load_registry():
+        if args.repo and entry["name"] != args.repo:
+            continue
+        loaded = load_deck(entry)
+        if loaded is None:
+            continue
+        deck, _cards = loaded
+        topics = deck.get("topics") or {}
+        if not topics:
+            print(f"\n{C['bold']}{entry['name']}{C['reset']}  {C['dim']}no topics defined{C['reset']}")
+            continue
+        found = True
+        print(f"\n{C['bold']}{entry['name']}{C['reset']}")
+        for name, topic in topics.items():
+            _t, cards, missing = topic_cards(deck, name)
+            warn = f"  {C['yellow']}({len(missing)} card(s) no longer in the deck){C['reset']}" if missing else ""
+            print(f"  {C['cyan']}{name:<22}{C['reset']} {len(cards):>3} cards  {C['dim']}{topic.get('description', '')}{C['reset']}{warn}")
+    if found:
+        print(f"\n{C['dim']}Read one with: repo-cards brief --topic <name>{C['reset']}")
+    print()
+    return 0
+
+
+def cmd_brief(args) -> int:
+    """Read an area end to end, question and answer together, in order.
+
+    Deliberately not a review: it writes no state. Cramming before a meeting is a different
+    mental mode from recall practice, and letting it reschedule cards you already know would
+    corrupt the one signal the boxes carry. Order is the deck's or the topic's, never
+    shuffled, because this is for rebuilding a mental model rather than testing it.
+    """
+    if not (args.topic or args.tag or args.grep):
+        print(f"{C['dim']}Pick an area: --topic NAME, --tag a,b or --grep PATTERN.{C['reset']}\n")
+        return cmd_topics(args)
+
+    width = min(shutil.get_terminal_size((90, 24)).columns, 96)
+    tags, grep = wanted_tags(args), compile_grep(args.grep)
+    shown = 0
+
+    for entry in load_registry():
+        if args.repo and entry["name"] != args.repo:
+            continue
+        loaded = load_deck(entry)
+        if loaded is None:
+            continue
+        deck, cards = loaded
+        heading, missing = "", []
+
+        if args.topic:
+            topic, cards, missing = topic_cards(deck, args.topic)
+            if topic is None:
+                continue
+            heading = topic.get("description", "")
+            notes = topic.get("notes")
+        else:
+            notes = None
+        cards = [c for c in cards if card_matches(c, tags, grep)]
+        if not cards:
+            continue
+
+        label = f"{entry['name']} · {args.topic}" if args.topic else entry["name"]
+        print(f"\n{C['bold']}{label}{C['reset']}")
+        if heading:
+            print(f"{C['dim']}{heading}{C['reset']}")
+        line = f"{len(cards)} card(s)"
+        if notes:
+            note_path = deck_dir(entry["name"]) / notes
+            line += f" · notes: {note_path}" + ("" if note_path.exists() else f"  {C['yellow']}(missing){C['reset']}")
+        print(f"{C['dim']}{line}{C['reset']}")
+        if missing:
+            print(f"{C['yellow']}{len(missing)} card(s) in this topic are no longer in the deck: {', '.join(missing)}{C['reset']}")
+        print()
+
+        for n, card in enumerate(cards, 1):
+            print(f"{C['bold']}{n:>3}. {wrap(card['q'], width - 5, '').lstrip()}{C['reset']}")
+            print(f"{C['cyan']}{wrap(card['a'], width, '     ')}{C['reset']}")
+            print(f"{C['dim']}     {card.get('anchor', '-')}{C['reset']}\n")
+            shown += 1
+
+    if not shown:
+        scope = args.topic or args.tag or args.grep
+        print(f"{C['yellow']}Nothing matched {scope!r}.{C['reset']} {C['dim']}Try: repo-cards topics{C['reset']}")
+        return 1
+    print(f"{C['dim']}{shown} card(s). Nothing was rescheduled.{C['reset']}\n")
+    return 0
+
+
 # --- registry management -----------------------------------------------------
 
 def cmd_register(args) -> int:
@@ -476,17 +627,21 @@ def main() -> int:
     p = argparse.ArgumentParser(prog="repo-cards", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("command", nargs="?", default="review",
-                   choices=["review", "stats", "list", "drift", "register", "forget", "repos", "home"])
+                   choices=["review", "brief", "topics", "stats", "list", "drift",
+                            "register", "forget", "repos", "home"])
     p.add_argument("path", nargs="?", help="for `register`: repo root. for `forget`: the name")
     p.add_argument("--name", help="for `register`: deck name (default: directory name)")
     p.add_argument("--repo", help="limit to one registered repo")
-    p.add_argument("--tag", help="limit to one tag")
+    p.add_argument("--tag", help="limit to these tags (one name, or a comma-separated list)")
+    p.add_argument("--grep", help="limit to cards matching this regex (question, answer, anchor, tags)")
+    p.add_argument("--topic", help="limit to a curated topic (see `repo-cards topics`)")
     p.add_argument("--limit", type=int, help="cap the session length")
     p.add_argument("--all", action="store_true", help="ignore due dates (cram)")
     p.add_argument("--new", action="store_true", help="only cards never seen")
     args = p.parse_args()
     return {
-        "review": cmd_review, "stats": cmd_stats, "list": cmd_list, "drift": cmd_drift,
+        "review": cmd_review, "brief": cmd_brief, "topics": cmd_topics,
+        "stats": cmd_stats, "list": cmd_list, "drift": cmd_drift,
         "register": cmd_register, "forget": cmd_forget, "repos": cmd_repos, "home": cmd_home,
     }[args.command](args)
 

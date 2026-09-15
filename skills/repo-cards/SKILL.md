@@ -23,6 +23,8 @@ repo-cards register PATH        # add a repo (--name to override the deck name)
 repo-cards drift --repo NAME    # what changed since the deck was generated
 repo-cards stats                # due counts, box distribution, stickiest cards
 repo-cards list --repo NAME     # every card with its box and due date
+repo-cards topics               # what topics a deck defines
+repo-cards brief --topic NAME   # read one area end to end; writes no state
 ```
 
 ## Where things live
@@ -122,6 +124,35 @@ real 17-commit window, this was the difference between 28 cards to verify and 16
 Use YAML `>-` for prose and `|-` where line structure matters (tables, ordered lists). Avoid
 unquoted colons in plain scalars.
 
+## Topics
+
+A topic is a **curated reading order**: the cards for one feature, in the order that tells the
+story. `repo-cards brief --topic NAME` reads one end to end and writes no state, which is what
+somebody does the night before a meeting about that feature.
+
+```yaml
+topics:
+  plan-flow:
+    description: How a plan moves from proposed through applied, and what watches it
+    notes: notes/plan-lifecycle.md     # optional, relative to the deck directory
+    cards:                             # ordered, and a card may appear in several topics
+      - plan-five-states
+      - plan-three-triggers
+      - plan-version-allocation
+```
+
+**Order is the point.** A topic is read to rebuild a mental model, and the story runs in a
+direction: what triggers it, then what it writes, then what carries it, then what watches it.
+Alphabetical or tag order teaches nothing that a `--tag` filter would not.
+
+**Propose four to eight topics when generating a deck.** Cover the areas somebody would actually
+hold a meeting about, and always include an `orientation` topic for coming back after months away.
+Point `notes:` at a long-form note where one exists.
+
+A topic is not the only way to slice a deck, and not every slice needs one. `--tag a,b` and
+`--grep PATTERN` need no curation and handle the ad-hoc case; a topic earns its place when the
+feature spans tags or when the order matters.
+
 ## Mode: generate
 
 1. `repo-cards register <repo root>` first, so the deck has a home. Confirm the path with
@@ -135,9 +166,12 @@ unquoted colons in plain scalars.
 5. Write the deck to `<data home>/<name>/deck.yaml` with `repo`, `description`,
    `last_update_sha` (current short HEAD) and `last_update_date`. Do **not** put the repo root in
    the deck: that is machine-specific and lives in the registry.
-6. Validate before finishing: parse the YAML, check for duplicate ids, and check every card has
-   `id`, `q`, `a`, `anchor`, `tags`.
-7. Report the card count and tag breakdown, and name anything deliberately left out.
+6. **Propose topics** in the same pass, per the section above. They are cheap while the whole deck
+   is in front of you and tedious to retrofit.
+7. Validate before finishing: parse the YAML, check for duplicate ids, check every card has `id`,
+   `q`, `a`, `anchor`, `tags`, and check every topic id resolves to a real card.
+8. Report the card count, the tag breakdown and the topics, and name anything deliberately left
+   out.
 
 ## Mode: update
 
@@ -158,9 +192,11 @@ Then, in order:
    the same pass.
 3. **Then consider new cards** from the uncovered-files list, against the same bar. Most changed
    files warrant no card.
-4. Bump `last_update_sha` and `last_update_date`.
-5. Re-validate and report: verified, rewritten, retired, added, one line of reasoning each. Short
-   enough to read in a minute.
+4. **Fix the topics.** A retired card leaves a dangling id, which `repo-cards topics` flags; a new
+   card usually belongs in an existing topic, and a genuinely new feature area may want its own.
+5. Bump `last_update_sha` and `last_update_date`.
+6. Re-validate and report: verified, rewritten, retired, added, topics touched, one line of
+   reasoning each. Short enough to read in a minute.
 
 If the deck has drifted a long way (hundreds of commits), say so and offer a regenerate rather than
 pretending an incremental pass covered it.
@@ -175,8 +211,15 @@ repo-cards --repo billing   # one repo
 repo-cards --tag invariant  # one theme
 repo-cards --limit 15       # cap the session
 repo-cards --new            # only cards never seen
-repo-cards --all            # ignore due dates (cram before a meeting)
+repo-cards --all            # ignore due dates (cram)
+repo-cards --tag a,b        # several themes at once
+repo-cards --grep PATTERN   # regex over question, answer, anchor and tags
+repo-cards --topic NAME     # one curated topic, graded as usual
 ```
+
+`brief` is the read-only counterpart, in deck or topic order rather than shuffled, for rebuilding a
+mental model rather than testing it. Suggest it when somebody says they have a meeting about an
+area, or are returning to a repo after a while.
 
 Boxes 1 to 5, due after 1, 2, 4, 8 and 16 days. A miss returns a card to box 1 rather than back one
 step, because a fact you have lost is not most of the way to known.

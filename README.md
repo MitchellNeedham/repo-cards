@@ -81,6 +81,31 @@ billing  74 cards, 9f8e7d6
   stickiest: settle-on-ack-not-delivery (x4), retry-is-not-redelivery (x3)
 ```
 
+Meeting tomorrow on one feature? `brief` reads an area end to end, in the order that tells the
+story, and **writes no state** so a cram does not reschedule cards you already know:
+
+```
+$ repo-cards topics
+
+billing
+  payouts       14 cards  How a payout moves from requested to settled
+  orientation    9 cards  What the system is and where the boundaries sit
+
+$ repo-cards brief --topic payouts
+
+billing · payouts
+How a payout moves from requested to settled
+14 card(s) · notes: ~/.local/share/repo-cards/billing/notes/payouts.md
+
+  1. ADR-7: enqueue writes an empty payload. Why is the outbox row blank?
+     It makes the message a prompt, not a snapshot. The row says this
+     invoice changed; the bytes are rendered at send time.
+     src/billing/outbox.py#enqueue
+```
+
+Ad-hoc slices need no curation: `--tag outbox,retry` takes several themes and `--grep 'idempoten'`
+searches question, answer, anchor and tags. Both work on `review` and `brief`.
+
 `update` starts from `drift`, which is what keeps a deck honest:
 
 ```
@@ -106,9 +131,10 @@ deck generated at: a1b2c3d      HEAD now: 9f8e7d6
 | | |
 |---|---|
 | `repo-cards` | everything due, across every registered repo |
-| `--repo N` `--tag T` `--limit N` | narrow the session |
-| `--new` `--all` | only unseen / ignore due dates and cram |
-| `stats` `list` `drift` | deck health, every card, what changed |
+| `brief` | read an area end to end, in order, writing no state |
+| `--repo N` `--tag a,b` `--grep RE` `--topic T` | narrow to a repo, themes, a search or a curated topic |
+| `--limit N` `--new` `--all` | cap the session / only unseen / ignore due dates |
+| `topics` `stats` `list` `drift` | topics defined, deck health, every card, what changed |
 | `register PATH` `forget NAME` `repos` | manage the registry |
 | `home` | where everything lives on this machine |
 
@@ -125,7 +151,7 @@ everywhere, `repo-cards home` prints what it resolved.
   <name>/
     deck.yaml         the cards. Content only, and portable
     state.json        Leitner state, keyed by card id
-    notes/            long-form notes for this repo, if any
+    notes/            long-form notes, which topics can point at
 ```
 
 ## Why it works this way
