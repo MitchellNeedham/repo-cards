@@ -32,20 +32,25 @@ one that takes more than ten minutes a day gets abandoned.
 Requires [uv](https://docs.astral.sh/uv/) and Claude Code.
 
 ```bash
-git clone https://github.com/OWNER/repo-cards ~/code/repo-cards
+git clone https://github.com/MitchellNeedham/repo-cards ~/code/repo-cards
 ~/code/repo-cards/install.sh          # Windows: install.ps1
 ```
 
+`install.sh` links `repo-cards` into `~/.local/bin`. Then add the skill in Claude Code:
+
 ```
-/plugin marketplace add OWNER/repo-cards
+/plugin marketplace add MitchellNeedham/repo-cards
 /plugin install repo-cards@repo-cards
 ```
 
 ## Use
 
-`repo-cards register ~/work/billing`, then in that repo ask Claude **"generate repo cards"**. After
-work lands, **"update my repo cards"**, which verifies existing cards against the diff before adding
-anything.
+```bash
+repo-cards register ~/work/billing
+```
+
+Then in that repo ask Claude **"generate repo cards"**. After work lands, **"update my repo cards"**,
+which verifies existing cards against the diff before adding anything.
 
 Reviewing is yours. Boxes 1 to 5, due after 1, 2, 4, 8 and 16 days; a miss drops to box 1 rather
 than back one step, because a fact you have lost is not most of the way to known.
@@ -72,17 +77,8 @@ $ repo-cards --limit 3
 2 right, 1 missed, 0 skipped  (67%)
 ```
 
-```
-$ repo-cards stats
-
-billing  74 cards, 9f8e7d6
-  12 due, 0 never seen
-  ▁ box1 3  ▃ box2 8  ▅ box3 21  ▆ box4 19  █ box5 23
-  stickiest: settle-on-ack-not-delivery (x4), retry-is-not-redelivery (x3)
-```
-
 Meeting tomorrow on one feature? `brief` reads an area end to end, in the order that tells the
-story, and **writes no state** so a cram does not reschedule cards you already know:
+story, and **writes no state**, so a cram does not reschedule cards you already know:
 
 ```
 $ repo-cards topics
