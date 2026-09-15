@@ -92,23 +92,27 @@ Boxes 1 to 5, due after 1, 2, 4, 8 and 16 days; a miss drops to box 1 rather tha
 because a fact you have lost is not most of the way to known.
 
 ```
- billing ▌payouts · recall                        4/22 · box 2 · ★★★
-
-  ADR-7: enqueue writes an empty payload. Why is the outbox row blank,
-  and what does that make it?
-
-  look: → src/billing/outbox.py#enqueue  the empty payload, and the comment
-        → docs/adr/adr-7-outbox.md  the decision, and what it rejected
-
-  ─────────────────────────────────────────────────────────────────
-
-  It makes the message a prompt, not a snapshot. The row says this invoice
-  changed; the bytes are rendered at send time.
-
-  anchor: src/billing/outbox.py#enqueue
-
-#outbox #invariant
-←/→ move · y got it · n missed · q quit
+╭─ billing ▌payouts · recall ───────────── 4/22  box 2  ★★★ ─╮
+│                                                            │
+│   ADR-7: enqueue writes an empty payload. Why is the       │
+│   outbox row blank, and what does that make it?            │
+│                                                            │
+│   → src/billing/outbox.py#enqueue                          │
+│     the empty payload, and the comment arguing it          │
+│   → docs/adr/adr-7-outbox.md                               │
+│     the decision, and what it rejected                     │
+│                                                            │
+├────────────────────────────────────────────────────────────┤
+│                                                            │
+│   It makes the message a prompt, not a snapshot. The row   │
+│   says this invoice changed; the bytes are rendered at     │
+│   send time.                                               │
+│                                                            │
+│   anchor  src/billing/outbox.py#enqueue                    │
+│                                                            │
+│   #outbox  #invariant                                      │
+│                                                            │
+╰─ ←/→ · y got it · n missed · q quit  ✓ got it ─────────────╯
 ```
 
 Repo and topic each get a stable colour, hashed from the name and de-collided so no two you have
