@@ -16,6 +16,7 @@ Content and scheduling state are separate files: regenerating a deck never costs
   repo-cards topics                what topics a deck defines
   repo-cards stats                 deck health and box distribution
   repo-cards drift                 what changed since a deck was last updated
+  repo-cards catchup               what moved since you last reviewed
   repo-cards register PATH         add a repo
   repo-cards home                  print where everything lives
 """
@@ -1931,6 +1932,120 @@ def cmd_drift(args) -> int:
     return 0
 
 
+# --- catchup: what moved while you were away ---------------------------------
+
+def commits_since(root: Path, since: str) -> list[tuple[str, int, str, set[str]]]:
+    """(sha, timestamp, subject, files) for each commit in the window, newest first.
+
+    One call per repo. NUL separates commits and unit separator splits the header, because
+    a commit subject can contain anything and a filename can look like a header line.
+    """
+    out = git(root, "log", f"--since={since_arg(since)}", "--name-only",
+              "--format=%x00%h%x1f%ct%x1f%s")
+    commits = []
+    for chunk in out.split("\x00"):
+        if not chunk.strip():
+            continue
+        head, *rest = chunk.split("\n")
+        sha, _, tail = head.partition("\x1f")
+        stamp, _, subject = tail.partition("\x1f")
+        files = {ln.strip() for ln in rest if ln.strip()}
+        commits.append((sha, int(stamp or 0), subject, files))
+    return commits
+
+
+def cmd_catchup(args) -> int:
+    """What has moved since you last *reviewed* a deck, against the cards you already hold.
+
+    The baseline is the last review, not the last update, because they answer different
+    questions. `drift` asks what the deck owes the repo, which is work for an update pass.
+    This asks what the repo did while you were on something else, which is the question you
+    actually have at nine o'clock on the morning you come back. It writes no state and needs
+    no model, so it costs a second rather than a session.
+    """
+    width = min(shutil.get_terminal_size((90, 24)).columns, 96)
+    cap = None if args.repo else 8
+    moved = 0
+
+    for entry in load_registry():
+        if args.repo and entry["name"] != args.repo:
+            continue
+        loaded = load_deck(entry, quiet=not args.repo)
+        if loaded is None:
+            continue
+        deck, cards = loaded
+        root = Path(entry["root"]).expanduser()
+        if not root.is_dir():
+            continue
+
+        state = load_state(entry["name"])
+        seen = [cs["last_seen"] for cs in state.values() if cs.get("last_seen")]
+        last = max(seen) if seen else ""
+        since = args.since or last or str(deck.get("last_update_date") or "")
+        if not since:
+            print(f"{C['yellow']}{entry['name']}: never reviewed and no deck date to work from."
+                  f"{C['reset']} {C['dim']}Try --since 2026-01-01{C['reset']}")
+            continue
+
+        log: dict[str, list] = {}
+
+        def commits_for(r: Path) -> list:
+            return log.setdefault(str(r), commits_since(r, since))
+
+        hits = []
+        for c in cards:
+            other, path = resolve_ref(str(c.get("anchor", "")), root)
+            if other is None or not other.is_dir():
+                continue
+            touching = [cm for cm in commits_for(other) if path in cm[3]]
+            if touching:
+                hits.append((max(cm[1] for cm in touching), c, touching))
+        hits.sort(key=lambda h: -h[0])
+
+        own = commits_for(root)
+        covered = {p for c in cards for p in local_paths(c, entry["name"])}
+        loose = [cm for cm in own if not (cm[3] & covered)]
+        ago = (today() - dt.date.fromisoformat(since)).days if not args.since else None
+        when = f"last reviewed {since}" if last and not args.since else f"since {since}"
+        when += f", {ago} day(s) ago" if ago is not None else ""
+        if not own and not hits:
+            if args.repo:
+                print(f"\n{C['bold']}{entry['name']}{C['reset']}  {C['dim']}{when}{C['reset']}  "
+                      f"{C['green']}nothing has moved{C['reset']}")
+            continue
+
+        moved += 1
+        print(f"\n{name_colour(entry['name'])}{C['bold']}{entry['name']}{C['reset']}  {C['dim']}{when}{C['reset']}")
+        print(f"{C['dim']}{len(own)} commit(s) here, {len(hits)} card(s) sitting on what they touched{C['reset']}")
+
+        for _ts, c, touching in hits[:cap]:
+            print(f"\n  {C['yellow']}⟳{C['reset']} {C['bold']}{c['id']}{C['reset']}  "
+                  f"{C['dim']}{c.get('anchor', '')}{C['reset']}")
+            print(wrap(str(c.get("q", "")), width, "     "))
+            if args.full:
+                print(f"{C['cyan']}{wrap(str(c.get('a', '')), width, '     ')}{C['reset']}")
+            for sha, _t, subject, _f in touching[:4]:
+                print(f"     {C['dim']}{sha}{C['reset']}  {subject}")
+            if len(touching) > 4:
+                print(f"     {C['dim']}+{len(touching) - 4} more{C['reset']}")
+        if cap and len(hits) > cap:
+            print(f"\n  {C['dim']}+{len(hits) - cap} more card(s): repo-cards catchup --repo {entry['name']}{C['reset']}")
+
+        if loose:
+            print(f"\n  {C['dim']}{len(loose)} commit(s) touching nothing carded:{C['reset']}")
+            for sha, _t, subject, _f in loose[:5]:
+                print(f"     {C['dim']}{sha}  {subject}{C['reset']}")
+            if len(loose) > 5:
+                print(f"     {C['dim']}+{len(loose) - 5} more{C['reset']}")
+
+    if not moved:
+        print(f"{C['green']}Nothing has moved since you last reviewed.{C['reset']}")
+        return 0
+    print(f"\n{C['dim']}Read the moving parts: repo-cards brief --topic last-week"
+          f"  ·  drill them: repo-cards --topic last-week --all{C['reset']}\n")
+    return 0
+
+
 # --- brief: read up on one area, without touching the schedule ---------------
 
 def cmd_topics(args) -> int:
@@ -2143,7 +2258,7 @@ def main() -> int:
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("command", nargs="?", default="review",
                    choices=["review", "test", "learn", "brief", "topics", "stats", "list",
-                            "drift", "flags", "register", "forget", "repos", "home"])
+                            "drift", "flags", "catchup", "register", "forget", "repos", "home"])
     p.add_argument("path", nargs="?",
                    help="for `register`: repo root. for `forget`: the name. for `flags`: a card id")
     p.add_argument("--name", help="for `register`: deck name (default: directory name)")
@@ -2160,6 +2275,7 @@ def main() -> int:
                    help="skip the interactive picker and review everything due")
     p.add_argument("--full", action="store_true", help="for `drift`: full detail for every repo, not a summary")
     p.add_argument("--clear", action="store_true", help="for `flags`: clear them, once an update has dealt with them")
+    p.add_argument("--since", help="for `catchup`: look back to this date instead of your last review")
     p.add_argument("--priority", type=int, choices=[1, 2, 3],
                    help="only cards at this priority (1 foundational, 2 core, 3 detail)")
     args = p.parse_args()
@@ -2170,6 +2286,7 @@ def main() -> int:
     return {
         "review": cmd_review, "brief": cmd_brief, "topics": cmd_topics,
         "stats": cmd_stats, "list": cmd_list, "drift": cmd_drift, "flags": cmd_flags,
+        "catchup": cmd_catchup,
         "register": cmd_register, "forget": cmd_forget, "repos": cmd_repos, "home": cmd_home,
     }[args.command](args)
 

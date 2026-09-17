@@ -126,6 +126,28 @@ card with good routes is asked that way about one time in six.
 history: the cards whose anchor a commit touched in that window, newest first. Those two need no
 maintenance and are the fastest way back in after time away.
 
+**`catchup` is the other half of coming back.** Its baseline is the last time you *reviewed* a
+deck, not the last time the deck was updated, so it answers what the repo did while you were on
+something else. Commits are grouped under the cards that sit on what they touched:
+
+```
+$ repo-cards catchup --repo billing
+
+billing  last reviewed 2026-08-27, 21 day(s) ago
+34 commit(s) here, 6 card(s) sitting on what they touched
+
+  ⟳ outbox-row-is-a-prompt  src/billing/outbox.py#enqueue
+     ADR-7: enqueue writes an empty payload. Why is the outbox row blank?
+     a41c9f2  Render at send time for backfills too
+     7b2e004  Drop the payload column, which nothing had read since ADR-7
+
+  6 commit(s) touching nothing carded:
+     3c1d88e  Add the reconciliation job
+```
+
+It writes no state and needs no model, which is the point: re-entry should cost a second, not a
+session.
+
 `drift` is the triage that `update` starts from:
 
 ```
@@ -152,6 +174,7 @@ $ repo-cards drift
 | `--repo N` `--tag a,b` `--grep RE` `--topic T` `--priority 1` | narrow the session |
 | `--limit N` `--new` `--all` `--no-pick` | cap it, unseen only, ignore due dates, skip the picker |
 | `topics` `stats` `list` `drift` | what exists, deck health, every card, what changed |
+| `catchup` `--since D` | what moved since you last reviewed, read-only |
 | `flags` `flags --clear` | cards you marked suspect during review, and clearing them |
 | `register PATH` `forget NAME` `repos` `home` | the registry, and where things live |
 

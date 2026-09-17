@@ -25,6 +25,7 @@ repo-cards home                 # where decks, state and notes live on this mach
 repo-cards repos                # what is registered
 repo-cards register PATH        # add a repo (--name to override the deck name)
 repo-cards drift --repo NAME    # what changed since the deck was generated
+repo-cards catchup --repo NAME  # what moved since you last reviewed it. Read-only
 repo-cards stats                # due counts, box distribution, stickiest cards
 repo-cards flags                # cards flagged as suspect during review
 repo-cards flags --clear        # clear them, once an update has dealt with them
@@ -345,6 +346,13 @@ not believe the card is a better signal than any diff.
 `brief` is the read-only counterpart, in deck or topic order rather than shuffled, for rebuilding a
 mental model rather than testing it. Suggest it when somebody says they have a meeting about an
 area, or are returning to a repo after a while.
+
+`repo-cards catchup` answers the other returning question: not what the deck owes the repo, which
+is `drift` and is work for an update, but **what the repo did while you were on something else**.
+Its baseline is the last time you *reviewed* the deck, and it prints the commits since then grouped
+under the cards that sit on what they touched, newest first. It writes no state and needs no model,
+so suggest it before offering an update: somebody coming back after three weeks usually wants to
+read for a minute, not spend a session regenerating cards.
 
 Boxes 1 to 5, due after 1, 2, 4, 8 and 16 days. A miss returns a card to box 1 rather than back one
 step, because a fact you have lost is not most of the way to known.
