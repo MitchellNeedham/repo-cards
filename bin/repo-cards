@@ -836,11 +836,16 @@ def link(text: str, root: Path, path: str) -> str:
     return f"\033]8;;{uri}\033\\{text}\033]8;;\033\\"
 
 
-def read_key() -> str:
-    """One keypress as a name: left, right, enter, esc, or the literal character."""
+def read_key(lower: bool = True) -> str:
+    """One keypress as a name: left, right, enter, esc, or the literal character.
+
+    `lower` is off while a line is being typed, where a capital is a capital rather than a
+    command.
+    """
     if not FULLSCREEN:
         try:
-            return (input() or "enter").strip().lower()
+            got = (input() or "enter").strip()
+            return got.lower() if lower else got
         except (EOFError, KeyboardInterrupt):
             return "q"
     if sys.platform == "win32":
@@ -848,7 +853,8 @@ def read_key() -> str:
         ch = msvcrt.getwch()
         if ch in ("\x00", "\xe0"):
             return {"K": "left", "M": "right", "H": "up", "P": "down"}.get(msvcrt.getwch(), "")
-        return {"\r": "enter", "\x1b": "esc", "\x03": "q"}.get(ch, ch.lower())
+        named = {"\r": "enter", "\x1b": "esc", "\x03": "q", "\x08": "backspace", "\x7f": "backspace"}
+        return named.get(ch) or (ch.lower() if lower else ch)
 
     import select
     import termios
@@ -862,7 +868,9 @@ def read_key() -> str:
         # every arrow key decodes as a bare Escape. That is what closed the picker.
         ch = os.read(fd, 1).decode("utf-8", "replace")
         if ch != "\x1b":
-            return {"\r": "enter", "\n": "enter", "\x03": "q", "\x04": "q"}.get(ch, ch.lower())
+            named = {"\r": "enter", "\n": "enter", "\x03": "q", "\x04": "q",
+                     "\x7f": "backspace", "\x08": "backspace"}
+            return named.get(ch) or (ch.lower() if lower else ch)
 
         # A bare Escape sends nothing more, so do not block waiting for a sequence.
         if not select.select([fd], [], [], 0.05)[0]:
@@ -887,6 +895,32 @@ def prompt(msg: str) -> str:
         return input(msg).strip().lower()
     except (EOFError, KeyboardInterrupt):
         return "q"
+
+
+def read_line(label: str, draw=None) -> str:
+    """One line of typed text, inside the alt screen when there is one.
+
+    The session owns the screen in fullscreen mode, so `input()` cannot be used: the buffer
+    is handed back to `draw` after every keypress and the caller redraws the card around it.
+    Piped, it is an ordinary line read, which is what keeps a session scriptable.
+    """
+    if not FULLSCREEN or draw is None:
+        try:
+            return input(f"{label} ").strip()
+        except (EOFError, KeyboardInterrupt):
+            return ""
+    buf = ""
+    while True:
+        draw(buf)
+        key = read_key(lower=False)
+        if key == "enter":
+            return buf.strip()
+        if key == "esc":
+            return ""
+        if key == "backspace":
+            buf = buf[:-1]
+        elif len(key) == 1 and key.isprintable():
+            buf += key
 
 
 # --- question kinds ----------------------------------------------------------
@@ -1334,6 +1368,15 @@ def run_session(queue: list[tuple], mode: str = "test") -> int:
                 # are different facts, and only the second one is worth an update's time.
                 if cs.pop("flagged", None) is None:
                     cs["flagged"] = today().isoformat()
+                    # Raised first, asked about second: an abandoned prompt must not lose the
+                    # flag, which is the part that matters.
+                    note = read_line("why?", lambda buf: draw_card(
+                        queue, i, kinds[card["id"]], roots[entry["name"]], cs,
+                        mode == "learn" or i in revealed, graded.get(i), mode, ("why?", buf)))
+                    if note:
+                        cs["flag_note"] = note
+                else:
+                    cs.pop("flag_note", None)
                 dirty[entry["name"]] = state
             elif key == "l":
                 mode = "learn" if mode == "test" else "test"
@@ -1365,7 +1408,7 @@ def run_session(queue: list[tuple], mode: str = "test") -> int:
     return finish_session(queue, graded, dirty)
 
 
-def draw_card(queue, i, kind, root, cs, revealed, grade, mode="test") -> None:
+def draw_card(queue, i, kind, root, cs, revealed, grade, mode="test", typing=None) -> None:
     entry, card, _state, _deck, _churn = queue[i]
     cols, rows = shutil.get_terminal_size((90, 24))
     # Wrap to the widest the box may ever be, then shrink the box to what the text used.
@@ -1396,6 +1439,9 @@ def draw_card(queue, i, kind, root, cs, revealed, grade, mode="test") -> None:
         body += [DIVIDER, ""] + render_answer(card, kind, inner - 2, root) + [""]
         anchor = str(card.get("anchor", "-"))
         body += [f"  {C['dim']}anchor{C['reset']}  {link(anchor, root, anchor)}", ""]
+    if typing is not None:
+        label, buf = typing
+        body += [f"  {sgr(179)}{label}{C['reset']} {buf}\u2588", ""]
 
     # Wrapped lines arrive as one string per block; split so the frame pads each row.
     flat: list[str] = []
@@ -1420,6 +1466,8 @@ def draw_card(queue, i, kind, root, cs, revealed, grade, mode="test") -> None:
             "n": f"{sgr(203)}✗ missed{C['reset']}"}.get(grade, "")
     if cs.get("flagged"):
         mark = (mark + "  " if mark else "") + f"{sgr(179)}⚑ flagged{C['reset']}"
+        if cs.get("flag_note"):
+            mark += f"{sgr(179)} +note{C['reset']}"
     foot = keys + (f"  {mark}" if mark else "")
 
     # Trim from the middle padding rather than the content if the card is taller than the
@@ -1693,8 +1741,8 @@ def drift_facts(entry: dict) -> dict:
     # Raised by hand during review, so it holds whatever the shas say: the reader met the
     # card and did not believe it. git cannot produce this signal and neither can the deck.
     state = load_state(entry["name"])
-    f["flagged"] = [(c, state[c["id"]]["flagged"]) for c in cards
-                    if state.get(c["id"], {}).get("flagged")]
+    f["flagged"] = [(c, state[c["id"]]["flagged"], state[c["id"]].get("flag_note", ""))
+                    for c in cards if state.get(c["id"], {}).get("flagged")]
     # The other half of the signal review generates. A card nobody can hold on to is a
     # defect in the writing, and until now that was visible in `stats` and acted on by
     # nobody: an update that only ever answers to git never fixes a badly written card.
@@ -1839,8 +1887,12 @@ def print_drift_detail(f: dict) -> None:
                   f"verifying this card by card.{C['reset']}")
     if f["flagged"]:
         print(f"\n--- cards you flagged during review ({len(f['flagged'])}) : VERIFY THESE FIRST ---")
-        for c, when in f["flagged"]:
+        for c, when, note in f["flagged"]:
             print(f"  {c['id']:<40} flagged {when}  {c.get('anchor', '')}")
+            if note:
+                # The reader's own words about what is wrong, which is the whole reason the
+                # flag beats a diff: it says what to look for, not just where.
+                print(f"  {'':<40} \"{note}\"")
     if f["sticky"]:
         print(f"\n--- cards missed {STICKY_LAPSES}+ times ({len(f['sticky'])}) : REWRITE THESE ---")
         for c, n in f["sticky"]:
@@ -2424,6 +2476,8 @@ def cmd_flags(args) -> int:
             cs = state[c["id"]]
             print(f"  {sgr(179)}⚑{C['reset']} {c['id']:<38} {C['dim']}flagged {cs['flagged']} · "
                   f"box {cs.get('box', 1)} · {c.get('anchor', '')}{C['reset']}")
+            if note := cs.get("flag_note"):
+                print(wrap(f"\u201c{note}\u201d", width, "      ", style=sgr(179)))
             print(wrap(str(c.get("q", "")), width, "      ", style=C["dim"]))
         total += len(rows)
 

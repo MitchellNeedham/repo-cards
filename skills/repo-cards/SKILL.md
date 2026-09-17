@@ -368,6 +368,11 @@ response: a miss is a scheduling fact, a flag is a defect in the deck. Flags are
 of `repo-cards drift` and the first step of an update, because a reader who knows the area and does
 not believe the card is a better signal than any diff.
 
+Flagging asks **why**, and the answer is carried into the report in the reader's own words. Take it
+seriously: "rendered in the worker now, not at send time" points straight at what to read, where
+the flag alone only says which card to doubt. The note is raised after the flag, so an abandoned
+prompt still leaves the flag standing.
+
 `brief` is the read-only counterpart, in deck or topic order rather than shuffled, for rebuilding a
 mental model rather than testing it. Suggest it when somebody says they have a meeting about an
 area, or are returning to a repo after a while.

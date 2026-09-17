@@ -109,11 +109,22 @@ Then one card at a time, sized to its content and centred:
 `←`/`→` move, `enter` reveals, `y`/`n` grade. Boxes 1 to 5, due after 1, 2, 4, 8 and 16 days; a
 miss drops to box 1, because a fact you have lost is not most of the way to known.
 
-**`f` flags a card you do not believe.** "I forgot this" and "this is not true any more" are
-different facts and only the second one is a defect, so a flag grades nothing. It lands at the top
-of the next `drift` and is the first thing an update looks at, which is how review feeds the deck
-rather than only consuming it. On a repo that moves weekly, this catches what git cannot: a card
-that was wrong the day it was written.
+**`f` flags a card you do not believe**, and asks why. "I forgot this" and "this is not true any
+more" are different facts and only the second one is a defect, so a flag grades nothing. The note
+goes with it:
+
+```
+╭─ billing · recall ──────────────────────────────────────────╮
+│   ADR-7: enqueue writes an empty payload. Why is the        │
+│   outbox row blank, and what does that make it?             │
+│                                                             │
+│   why? rendered in the worker now, not at send time█        │
+╰─ ←/→ move · enter reveal · l learn · f unflag · q quit ─────╯
+```
+
+It lands at the top of the next `drift`, in your own words, and is the first thing an update looks
+at. That is how review feeds the deck rather than only consuming it, and it catches what git
+cannot: a card that was wrong the day it was written.
 
 **Two modes.** `test` (the default) hides the answer and is the only one that moves a card's box.
 `learn` shows everything and grades nothing. `l` switches mid-session.

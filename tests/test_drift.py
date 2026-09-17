@@ -97,7 +97,7 @@ def test_flags_and_lapses_reach_the_report(rc, two_symbols, deck_factory, card):
         "b": {"box": 1, "due": "2026-01-01", "seen": 9, "lapses": rc.STICKY_LAPSES},
     })
     f = rc.drift_facts(entry)
-    assert [c["id"] for c, _when in f["flagged"]] == ["a"]
+    assert [c["id"] for c, _when, _note in f["flagged"]] == ["a"]
     assert [c["id"] for c, _n in f["sticky"]] == ["b"]
 
 
