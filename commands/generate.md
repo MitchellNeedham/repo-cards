@@ -31,3 +31,10 @@ Then:
 
 If a deck already exists for this repo, stop and say so: `/repo-cards:update` is the command that
 keeps an existing deck current without discarding review progress.
+
+When the user has asked for a regenerate anyway, because `drift` reported the deck too far behind
+to verify card by card, **keep the ids of cards whose fact survives**: an id is what carries the
+review box. Then run `repo-cards check --repo <name>`, which lists every state entry no card claims
+and guesses which new id it belongs to, and hand each one back with
+`repo-cards adopt --repo <name> old-id=new-id`. Report how many boxes were preserved and how many
+were genuinely retired.

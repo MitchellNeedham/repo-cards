@@ -18,6 +18,7 @@ Content and scheduling state are separate files: regenerating a deck never costs
   repo-cards drift                 what changed since a deck was last updated
   repo-cards catchup               what moved since you last reviewed
   repo-cards check                 validate a deck against the rules it is written to
+  repo-cards adopt OLD=NEW         give a renamed card the history of the old id
   repo-cards register PATH         add a repo
   repo-cards home                  print where everything lives
 """
@@ -27,6 +28,7 @@ from __future__ import annotations
 import argparse
 import collections
 import datetime as dt
+import difflib
 import zlib
 import json
 import os
@@ -2046,6 +2048,74 @@ def check_deck(entry: dict, deck: dict, cards: list[dict]) -> list[tuple[str, st
     return out
 
 
+#: How alike two ids have to be before a rename is worth suggesting. Low enough to catch
+#: `plan-five-states` -> `plan-has-five-states`, high enough not to pair unrelated cards.
+RENAME_RATIO = 0.6
+
+
+def orphan_state(deck_cards: list[dict], state: dict) -> list[tuple[str, dict, str, float]]:
+    """State entries with no card, each with the closest card id that has no state of its own.
+
+    The skill tells you to regenerate a deck once it has drifted far enough, and promises that
+    a card keeping its id keeps its box. Nothing checked that the ids were kept. A model
+    rewording an id while rewriting a deck silently resets that card's history, and an
+    orphaned entry is documented as ignored, so the loss is invisible at exactly the moment
+    it is most likely. This is what makes a regenerate safe to recommend.
+    """
+    ids = {str(c.get("id") or "") for c in deck_cards}
+    unclaimed = sorted(ids - set(state))
+    out = []
+    for cid, cs in state.items():
+        if cid in ids:
+            continue
+        match, ratio = "", 0.0
+        for cand in unclaimed:
+            r = difflib.SequenceMatcher(None, cid, cand).ratio()
+            if r > ratio:
+                match, ratio = cand, r
+        out.append((cid, cs, match if ratio >= RENAME_RATIO else "", ratio))
+    return sorted(out, key=lambda o: (-o[1].get("box", 1), o[0]))
+
+
+def cmd_adopt(args) -> int:
+    """Hand one card's review history to another id, after a rename.
+
+    The only supported way to edit state.json, and it exists because the skill forbids
+    editing that file by hand: it is the one file in the deck directory that cannot be
+    regenerated from anything.
+    """
+    pairs = [p.split("=", 1) for p in str(args.path or "").split(",") if "=" in p]
+    if not args.repo or not pairs:
+        print(f"{C['red']}usage: repo-cards adopt --repo NAME old-id=new-id[,old=new]{C['reset']}")
+        return 1
+    entry = next((e for e in load_registry() if e["name"] == args.repo), None)
+    if entry is None:
+        print(f"{C['red']}{args.repo} is not registered{C['reset']}")
+        return 1
+    loaded = load_deck(entry)
+    if loaded is None:
+        return 1
+    _deck, cards = loaded
+    ids = {str(c.get("id") or "") for c in cards}
+    state = load_state(args.repo)
+
+    moved = 0
+    for old, new in [(a.strip(), b.strip()) for a, b in pairs]:
+        if old not in state:
+            print(f"{C['yellow']}{old}: no state to move{C['reset']}")
+        elif new not in ids:
+            print(f"{C['red']}{new}: no such card in {args.repo}{C['reset']}")
+        elif new in state:
+            print(f"{C['red']}{new}: already has its own history, which this would overwrite{C['reset']}")
+        else:
+            state[new] = state.pop(old)
+            print(f"{C['green']}{old} -> {new}{C['reset']}  {C['dim']}box {state[new].get('box', 1)} kept{C['reset']}")
+            moved += 1
+    if moved:
+        save_state(args.repo, state)
+    return 0 if moved else 1
+
+
 def cmd_check(args) -> int:
     """Validate decks against the rules the skill describes. Exit 1 if anything is broken."""
     errors = warnings = decks = 0
@@ -2064,10 +2134,11 @@ def cmd_check(args) -> int:
         deck, cards = loaded
         decks += 1
         found = check_deck(entry, deck, cards)
+        orphans = orphan_state(cards, load_state(entry["name"]))
         errors += sum(1 for lvl, _, _ in found if lvl == "error")
-        warnings += sum(1 for lvl, _, _ in found if lvl == "warn")
+        warnings += sum(1 for lvl, _, _ in found if lvl == "warn") + len(orphans)
         head = f"{C['bold']}{entry['name']}{C['reset']}  {C['dim']}{len(cards)} cards{C['reset']}"
-        if not found:
+        if not found and not orphans:
             print(f"\n{head}  {C['green']}clean{C['reset']}")
             continue
         print(f"\n{head}")
@@ -2076,6 +2147,22 @@ def cmd_check(args) -> int:
                 continue
             tag = f"{C['red']}error{C['reset']}" if level == "error" else f"{C['yellow']}warn {C['reset']}"
             print(f"  {tag}  {scope:<38} {msg}")
+
+        if orphans and not args.errors_only:
+            kept = sum(1 for _c, cs, _m, _r in orphans if cs.get("box", 1) > 1)
+            print(f"\n  {C['yellow']}{len(orphans)} state entr(ies) with no card{C['reset']}"
+                  f"{C['dim']}, {kept} of them past box 1. A retired card is fine here; a renamed "
+                  f"one has lost its history.{C['reset']}")
+            for cid, cs, match, ratio in orphans:
+                seen = f"box {cs.get('box', 1)}, seen {cs.get('seen', 0)}x"
+                if match:
+                    print(f"  {C['yellow']}warn {C['reset']}  {cid:<38} {seen}, and no card claims it. "
+                          f"Renamed to {C['bold']}{match}{C['reset']}? ({ratio:.0%} alike)")
+                else:
+                    print(f"  {C['yellow']}warn {C['reset']}  {cid:<38} {seen}, and nothing in the deck looks like it")
+            if any(m for _c, _s, m, _r in orphans):
+                moves = ",".join(f"{cid}={match}" for cid, _cs, match, _r in orphans if match)
+                print(f"  {C['dim']}Restore them with: repo-cards adopt --repo {entry['name']} {moves}{C['reset']}")
 
     if not decks and not errors:
         print("No decks to check. Generate one with /repo-cards:generate")
@@ -2410,10 +2497,11 @@ def main() -> int:
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("command", nargs="?", default="review",
                    choices=["review", "test", "learn", "brief", "topics", "stats", "list",
-                            "drift", "flags", "catchup", "check", "register", "forget",
-                            "repos", "home"])
+                            "drift", "flags", "catchup", "check", "adopt", "register",
+                            "forget", "repos", "home"])
     p.add_argument("path", nargs="?",
-                   help="for `register`: repo root. for `forget`: the name. for `flags`: a card id")
+                   help="for `register`: repo root. for `forget`: the name. for `flags`: a card id. "
+                        "for `adopt`: old-id=new-id pairs")
     p.add_argument("--name", help="for `register`: deck name (default: directory name)")
     p.add_argument("--repo", help="limit to one registered repo")
     p.add_argument("--tag", help="limit to these tags (one name, or a comma-separated list)")
@@ -2441,7 +2529,7 @@ def main() -> int:
     return {
         "review": cmd_review, "brief": cmd_brief, "topics": cmd_topics,
         "stats": cmd_stats, "list": cmd_list, "drift": cmd_drift, "flags": cmd_flags,
-        "catchup": cmd_catchup, "check": cmd_check,
+        "catchup": cmd_catchup, "check": cmd_check, "adopt": cmd_adopt,
         "register": cmd_register, "forget": cmd_forget, "repos": cmd_repos, "home": cmd_home,
     }[args.command](args)
 

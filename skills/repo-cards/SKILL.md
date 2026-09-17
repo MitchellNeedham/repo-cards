@@ -27,6 +27,7 @@ repo-cards register PATH        # add a repo (--name to override the deck name)
 repo-cards drift --repo NAME    # what changed since the deck was generated
 repo-cards catchup --repo NAME  # what moved since you last reviewed it. Read-only
 repo-cards check --repo NAME    # validate a deck. Exit 1 if anything is broken
+repo-cards adopt --repo NAME old=new    # give a renamed card the old id's review history
 repo-cards stats                # due counts, box distribution, stickiest cards
 repo-cards flags                # cards flagged as suspect during review
 repo-cards flags --clear        # clear them, once an update has dealt with them
@@ -55,6 +56,13 @@ the layout is:
 
 Content and state are separate files **so regenerating a deck never costs review progress**. A card
 that keeps its id keeps its box. Retiring a card leaves an orphaned state entry, which is ignored.
+
+That promise is only as good as the ids, and a regenerate is exactly where they slip: reword one
+while rewriting a deck and that card is back in box 1 with no warning, because an orphaned entry is
+ignored rather than reported. `repo-cards check` lists every state entry no card claims, with the
+closest unclaimed id and how alike the two are, and `repo-cards adopt --repo NAME old=new` hands the
+history over. **Run `check` after any regenerate** and deal with the orphans before reporting the
+deck as done.
 
 ## What earns a card
 
@@ -368,7 +376,8 @@ step, because a fact you have lost is not most of the way to known.
 * `repo-cards` is a `uv` script with an inline dependency on `pyyaml`. It needs `uv` on PATH and
   has no virtualenv of its own.
 * Never regenerate or hand-edit `state.json`. If a card's meaning changes enough that its history is
-  misleading, give it a new id, which resets it honestly.
+  misleading, give it a new id, which resets it honestly. `repo-cards adopt` is the one supported
+  way to move an entry, and it exists for the opposite case: the id changed but the fact did not.
 * `repo-cards stats` shows the stickiest cards by lapse count, and `drift` lists the ones missed
   three times or more as cards to rewrite. That many lapses usually means the card is badly written
   rather than the fact being hard: it is probably two facts, or the question is recognisable rather

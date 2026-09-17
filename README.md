@@ -175,6 +175,7 @@ $ repo-cards drift
 | `--limit N` `--new` `--all` `--no-pick` | cap it, unseen only, ignore due dates, skip the picker |
 | `topics` `stats` `list` `drift` | what exists, deck health, every card, what changed |
 | `check` `--strict` | validate a deck against the rules it is written to |
+| `adopt OLD=NEW` | give a renamed card the old id's review history |
 | `catchup` `--since D` | what moved since you last reviewed, read-only |
 | `flags` `flags --clear` | cards you marked suspect during review, and clearing them |
 | `register PATH` `forget NAME` `repos` `home` | the registry, and where things live |
@@ -199,7 +200,10 @@ everywhere, and `repo-cards home` prints what it resolved.
 ## Why it works this way
 
 - **Content and state are separate files**, so regenerating a deck never costs review progress. A
-  card that keeps its id keeps its box, which is what makes `update` safe to run often.
+  card that keeps its id keeps its box, which is what makes `update` safe to run often. `check`
+  guards the promise: it lists every state entry no card claims and guesses which renamed card it
+  belongs to, and `adopt` hands the history back. Without that, a reworded id silently resets a
+  card you had at box 4.
 - **Every card carries a source anchor, and `update` verifies before it adds.** A stale card is
   worse than a missing one, because you act on it confidently. A deck that only grows starts lying.
 - **Anchors name a symbol, not just a file**, so one commit to a large module does not flag every
