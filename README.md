@@ -180,6 +180,9 @@ everywhere, and `repo-cards home` prints what it resolved.
   worse than a missing one, because you act on it confidently. A deck that only grows starts lying.
 - **Anchors name a symbol, not just a file**, so one commit to a large module does not flag every
   card drawn from it. On a real 17-commit window: 16 cards to verify instead of 28.
+- **Review feeds the deck, not just the schedule.** A flag raised during review and a card missed
+  three times running both land in `drift`, so an update fixes what the reading is telling you as
+  well as what the commits are.
 - **Churn is measured, not declared.** A card whose anchor was edited twenty times this year
   outranks one pointing at a decision nobody has revisited in three.
 - **Priority is weighted, with a starvation guard.** A card's score also falls the longer it stays

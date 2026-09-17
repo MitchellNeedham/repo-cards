@@ -84,6 +84,12 @@ MIN_WIDTH = 44
 REGEN_COMMITS = 60
 REGEN_DEAD_FRACTION = 0.25
 
+# Lapses before a card is called out as probably badly written rather than hard. Three is
+# where the balance tips: twice is a fact that needs another look, and a third miss on a
+# card whose area you work in usually means the card is two facts wearing one id, or that
+# the question is recognisable rather than answerable.
+STICKY_LAPSES = 3
+
 CHURN_WINDOW_DAYS = 180
 CHURN_FLOOR = 3
 CHURN_WEIGHT = 0.5
@@ -1612,7 +1618,7 @@ def drift_facts(entry: dict) -> dict:
     root = Path(entry["root"]).expanduser()
     f = {"name": entry["name"], "root": root, "sha": None, "cards": [], "head": "", "log": "",
          "changed": [], "hot": [], "cold": [], "routes": [], "dead": [], "uncovered": [],
-         "unknown_repo": [], "flagged": [], "status": "", "regen": False}
+         "unknown_repo": [], "flagged": [], "sticky": [], "status": "", "regen": False}
 
     def note_dead() -> None:
         """Paths a card points at that are not in the repo any more.
@@ -1646,6 +1652,12 @@ def drift_facts(entry: dict) -> dict:
     state = load_state(entry["name"])
     f["flagged"] = [(c, state[c["id"]]["flagged"]) for c in cards
                     if state.get(c["id"], {}).get("flagged")]
+    # The other half of the signal review generates. A card nobody can hold on to is a
+    # defect in the writing, and until now that was visible in `stats` and acted on by
+    # nobody: an update that only ever answers to git never fixes a badly written card.
+    f["sticky"] = sorted(((c, state[c["id"]]["lapses"]) for c in cards
+                          if state.get(c["id"], {}).get("lapses", 0) >= STICKY_LAPSES),
+                         key=lambda cl: -cl[1])
 
     if not root.is_dir():
         f["status"] = "root missing"
@@ -1760,6 +1772,12 @@ def print_drift_detail(f: dict) -> None:
         print(f"\n--- cards you flagged during review ({len(f['flagged'])}) : VERIFY THESE FIRST ---")
         for c, when in f["flagged"]:
             print(f"  {c['id']:<40} flagged {when}  {c.get('anchor', '')}")
+    if f["sticky"]:
+        print(f"\n--- cards missed {STICKY_LAPSES}+ times ({len(f['sticky'])}) : REWRITE THESE ---")
+        for c, n in f["sticky"]:
+            print(f"  {c['id']:<40} missed x{n}  {c.get('anchor', '')}")
+        print("  usually two facts under one id, or a question that is recognisable rather "
+              "than answerable")
     if f["hot"] or f["status"] == "behind":
         print(f"\n--- cards whose anchor changed ({len(f['hot'])}) : VERIFY THESE ---")
         print("\n".join(f"  {c['id']:<40} {c['anchor']}" for c in f["hot"]) or "  (none)")
@@ -1845,7 +1863,12 @@ def cmd_drift(args) -> int:
         n = sum(len(f["flagged"]) for f in flagged)
         print(f"  {sgr(179)}{n} card(s) flagged during review{C['reset']} in "
               f"{', '.join(f['name'] for f in flagged)}. {C['dim']}Detail: repo-cards flags{C['reset']}")
-    if not behind and not linked and not ungenerated and not flagged:
+    sticky = [f for f in facts if f["sticky"]]
+    if sticky:
+        n = sum(len(f["sticky"]) for f in sticky)
+        print(f"  {n} card(s) missed {STICKY_LAPSES}+ times in {', '.join(f['name'] for f in sticky)}. "
+              f"{C['dim']}Worth rewriting: repo-cards drift --repo <name>{C['reset']}")
+    if not behind and not linked and not ungenerated and not flagged and not sticky:
         print(f"  {C['green']}Every deck is current.{C['reset']}")
     print()
     return 0

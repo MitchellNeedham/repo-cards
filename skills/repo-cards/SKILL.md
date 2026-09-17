@@ -262,27 +262,32 @@ Then, in order:
    said it was wrong. Verify each one, rewrite or retire it, and clear the flags with
    `repo-cards flags --clear --repo <name>` once they are dealt with. A flag left standing after an
    update is worse than none, because the next pass re-reads a card that is now fine.
-2. **Verify before adding.** For every card the drift report flags hot, read the anchor as it is
+2. **Rewrite the cards nobody can hold on to.** `drift` lists cards missed three times or more.
+   That is almost never a hard fact: it is two facts under one id, or a question that can be
+   recognised rather than answered. Split it or rewrite the question. Keep the id if the fact is
+   the same one; give it a new id if you have genuinely changed what is being asked, so its
+   history does not flatter the new card.
+3. **Verify before adding.** For every card the drift report flags hot, read the anchor as it is
    *now* and decide: still true (leave it, id included), now wrong (rewrite the answer, keep the id
    so the box survives), or no longer a fact (retire it).
    **This step is the point of the update.** A deck that only grows is a deck that quietly starts
    lying.
-3. **Read the commit messages, not just the diff.** A commit like "Drop RabbitMQ, which nobody can
+4. **Read the commit messages, not just the diff.** A commit like "Drop RabbitMQ, which nobody can
    say what was wrong with" is a decision with reasoning, which is exactly what a card is for. A
    decision *reversed* is the highest-value card in an update, and the old card must be retired in
    the same pass.
-4. **Then consider new cards** from the uncovered-files list, against the same bar. Most changed
+5. **Then consider new cards** from the uncovered-files list, against the same bar. Most changed
    files warrant no card.
-5. **Fix the routes.** `drift` reports two things beside the anchors: cards whose `look` route
+6. **Fix the routes.** `drift` reports two things beside the anchors: cards whose `look` route
    changed, where the fact is probably intact but the directions moved, and **paths that no longer
    exist**, which are defects and should be repaired in every pass.
-6. **Fix the topics.** A retired card leaves a dangling id, which `repo-cards topics` flags; a new
+7. **Fix the topics.** A retired card leaves a dangling id, which `repo-cards topics` flags; a new
    card usually belongs in an existing topic, and a genuinely new feature area may want its own.
-7. **Stamp what changed.** A rewritten card gets `updated: <today>`; a new one gets
+8. **Stamp what changed.** A rewritten card gets `updated: <today>`; a new one gets
    `added: <today>`. That is the only record of recency, since the deck is not in git, and it is
    what floats new material to the front of a session.
-8. Bump `last_update_sha` and `last_update_date`.
-9. Re-validate and report: verified, rewritten, retired, added, topics touched, one line of
+9. Bump `last_update_sha` and `last_update_date`.
+10. Re-validate and report: verified, rewritten, retired, added, topics touched, one line of
    reasoning each. Short enough to read in a minute.
 
 `drift` decides this for you rather than leaving it to judgement: past roughly 60 commits, or once
@@ -339,6 +344,7 @@ step, because a fact you have lost is not most of the way to known.
   has no virtualenv of its own.
 * Never regenerate or hand-edit `state.json`. If a card's meaning changes enough that its history is
   misleading, give it a new id, which resets it honestly.
-* `repo-cards stats` shows the stickiest cards by lapse count. Three or more lapses usually means
-  the card is badly written rather than the fact being hard: it is probably two facts, or the
-  question is recognisable rather than answerable. Offer to rewrite it.
+* `repo-cards stats` shows the stickiest cards by lapse count, and `drift` lists the ones missed
+  three times or more as cards to rewrite. That many lapses usually means the card is badly written
+  rather than the fact being hard: it is probably two facts, or the question is recognisable rather
+  than answerable. Offer to rewrite it.
