@@ -369,6 +369,13 @@ maintenance and cannot go stale, but they are a reason to **anchor on the file t
 changes** rather than a stable summary of it: an anchor nothing commits to will never appear in
 either.
 
+A revealed card has tabs, moved between with `↑`/`↓`: the answer, the routes, your note, the
+full question, and **why** this card is in front of you. That last one prints the queue score
+the scheduler actually used, broken into its parts: the priority tier, days overdue, how much
+the anchor has moved, and how it compares to the rest of the deck. Point somebody at it when
+they ask why they keep seeing a card, and at its lapse count when the answer is that the card
+is badly written.
+
 Run bare in a terminal, `repo-cards` opens a picker: choose which decks to mix, and drill into any
 of them with `→` to pick topics. Both lists scroll, with paging and `home`/`end`. In the session, `←`/`→` move between cards (there is no skip),
 `enter` reveals, `y`/`n` grade. File paths are clickable where the terminal supports it.

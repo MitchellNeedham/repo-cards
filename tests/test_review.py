@@ -222,3 +222,55 @@ class TestCardNotes:
         rc.cmd_adopt(argparse.Namespace(repo="repo", path="alpha-is-one=alpha-is-always-one"))
         assert rc.read_card_note("repo", "alpha-is-always-one") == "cost me an afternoon"
         assert not rc.card_note_path("repo", "alpha-is-one").exists()
+
+
+class TestWhyThisCard:
+    """The panel that explains the queue, and the guarantee that it cannot lie."""
+
+    def test_the_panel_sums_to_the_score_that_orders_the_queue(self, rc, monkeypatch, card):
+        """Explaining the order in a second implementation is how the two drift apart."""
+        monkeypatch.setattr(rc.random, "random", lambda: 0.0)
+        c = card("a", priority=1, anchor="a.py")
+        cs = {"box": 1, "due": (rc.today() - __import__("datetime").timedelta(days=10)).isoformat()}
+        parts = rc.score_parts(c, {}, cs)
+        assert sum(d for _w, d, _y in parts) == rc.order_score(c, {}, cs)
+
+    def test_an_overdue_card_says_so(self, rc, card):
+        import datetime as dt
+        cs = {"box": 1, "due": (rc.today() - dt.timedelta(days=9)).isoformat()}
+        labels = [w for w, _d, _y in rc.score_parts(card("a"), {}, cs)]
+        assert any("overdue 9d" == w for w in labels)
+
+    def test_a_card_that_is_not_overdue_says_nothing_about_it(self, rc, card):
+        cs = {"box": 1, "due": rc.today().isoformat()}
+        assert not any("overdue" in w for w, _d, _y in rc.score_parts(card("a"), {}, cs))
+
+    def test_grades_accumulate_into_a_history(self, rc, session, card):
+        state = session([card("a", anchor="src/mod.py#alpha"), card("b", anchor="src/mod.py#alpha")],
+                        ["enter", "y", "enter", "n", "q"])
+        assert state["a"]["history"] == "y"
+        assert state["b"]["history"] == "n"
+
+    def test_history_is_capped(self, rc, session, card):
+        state = session([card("a", anchor="src/mod.py#alpha"), card("b", anchor="src/mod.py#alpha")],
+                        ["enter", "y", "q"],
+                        state={"a": {"box": 1, "due": "2026-01-01", "seen": 99, "lapses": 0,
+                                     "history": "y" * rc.HISTORY_LEN}})
+        assert len(state["a"]["history"]) == rc.HISTORY_LEN
+
+    def test_tabs_offer_what_the_card_actually_has(self, rc, repo, deck_factory, card):
+        repo.write("src/mod.py", "def alpha():\n    return 1\n")
+        repo.commit("init")
+        entry = deck_factory(repo, [card("a", anchor="src/mod.py#alpha")])
+        bare = rc.card_tabs({"id": "a"}, entry, "recall")
+        assert "routes" not in bare and "note" not in bare
+        rc.append_card_note("repo", "a", "mine")
+        with_note = rc.card_tabs({"id": "a", "look": {"src/mod.py": "x", "docs": "y"}}, entry, "recall")
+        assert with_note == ["answer", "routes", "note", "why", "question"]
+
+    def test_a_locate_card_has_no_routes_tab(self, rc, repo, deck_factory, card):
+        """Its routes are the answer, so a routes tab would be the answer tab twice."""
+        repo.write("src/mod.py", "def alpha():\n    return 1\n")
+        repo.commit("init")
+        entry = deck_factory(repo, [card("a", anchor="src/mod.py#alpha")])
+        assert "routes" not in rc.card_tabs({"id": "a", "look": {"a": "x", "b": "y"}}, entry, "locate")

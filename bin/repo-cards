@@ -97,6 +97,9 @@ REGEN_DEAD_FRACTION = 0.25
 # the question is recognisable rather than answerable.
 STICKY_LAPSES = 3
 
+#: Grades kept per card, for the shape of it rather than the record.
+HISTORY_LEN = 24
+
 #: Every `git log` that asks which files moved needs these. A merge commit lists no files at
 #: all by default, so on a repo where work lands through merge requests the answer comes back
 #: empty: the merge shows no files, and the branch's own commits are dated when the work was
@@ -451,20 +454,39 @@ def churn_boost(card: dict, counts: dict[str, int], p90: float) -> float:
     return CHURN_WEIGHT * min(1.0, (n - CHURN_FLOOR) / (p90 - CHURN_FLOOR))
 
 
-def order_score(card: dict, deck: dict, cs: dict, churn: tuple[dict, float] = ({}, 0.0)) -> float:
-    """Lower sorts earlier. Weighted, not absolute: see JITTER and OVERDUE_PER_DAY."""
-    score = PRIORITY_WEIGHT[priority_of(card)]
+TIER = {1: "foundational", 2: "core", 3: "detail"}
+
+
+def score_parts(card: dict, deck: dict, cs: dict,
+                churn: tuple[dict, float] = ({}, 0.0)) -> list[tuple[str, float, str]]:
+    """(what, how much it moves the card, why) for everything that decides the queue order.
+
+    `order_score` is the sum of these, so the panel that explains the ordering cannot drift
+    away from the ordering it explains.
+    """
+    pri = priority_of(card)
+    parts = [(f"priority {pri}", PRIORITY_WEIGHT[pri], TIER[pri])]
     when = card_date(card, deck)
-    if when is not None and (today() - when).days <= RECENT_DAYS:
-        score -= RECENT_BOOST
-    score -= churn_boost(card, churn[0], churn[1])
+    if when is not None and (age := (today() - when).days) <= RECENT_DAYS:
+        parts.append((f"changed {age}d ago", -RECENT_BOOST,
+                      f"new material leads for {RECENT_DAYS} days"))
+    if boost := churn_boost(card, churn[0], churn[1]):
+        n = churn[0].get(str(card.get("anchor", "")).split("#")[0], 0)
+        parts.append((f"anchor moved {n}× in {CHURN_WINDOW_DAYS}d", -boost,
+                      f"against this deck's p90 of {churn[1]:.0f}"))
     try:
         overdue = (today() - dt.date.fromisoformat(cs["due"])).days
     except (KeyError, ValueError):
         overdue = 0
     if overdue > 0:
-        score -= min(overdue * OVERDUE_PER_DAY, OVERDUE_CAP)
-    return score + random.random() * JITTER
+        parts.append((f"overdue {overdue}d", -min(overdue * OVERDUE_PER_DAY, OVERDUE_CAP),
+                      f"the starvation guard, capped at {OVERDUE_CAP}"))
+    return parts
+
+
+def order_score(card: dict, deck: dict, cs: dict, churn: tuple[dict, float] = ({}, 0.0)) -> float:
+    """Lower sorts earlier. Weighted, not absolute: see JITTER and OVERDUE_PER_DAY."""
+    return sum(d for _w, d, _y in score_parts(card, deck, cs, churn)) + random.random() * JITTER
 
 
 def wanted_tags(args) -> set[str]:
@@ -1623,6 +1645,7 @@ def run_session(queue: list[tuple], mode: str = "test") -> int:
     graded: dict[int, str] = {}
     dirty: dict[str, dict] = {}
     checked: dict[int, list] = {}
+    tabs: dict[int, int] = {}
     i = 0
 
     save_prefs(mode=mode)
@@ -1637,7 +1660,7 @@ def run_session(queue: list[tuple], mode: str = "test") -> int:
             def redraw(typing=None):
                 draw_card(queue, i, kind, roots[entry["name"]], cs,
                           mode == "learn" or i in revealed, graded.get(i), mode,
-                          typing, checked.get(i))
+                          typing, checked.get(i), tabs.get(i, 0))
 
             redraw()
             key = read_key()
@@ -1660,6 +1683,10 @@ def run_session(queue: list[tuple], mode: str = "test") -> int:
             elif key == "l":
                 mode = "learn" if mode == "test" else "test"
                 save_prefs(mode=mode)
+            elif key in ("up", "down") and (mode == "learn" or i in revealed):
+                # Cards move on the horizontal, a card's own faces on the vertical.
+                n = len(card_tabs(card, entry, kind))
+                tabs[i] = (tabs.get(i, 0) + (1 if key == "down" else -1)) % n
             elif key == "left":
                 i = max(0, i - 1)
             elif key == "right":
@@ -1715,6 +1742,61 @@ def one_line(text: str, width: int) -> str:
     return flat[: max(0, width - 1)].rstrip() + "…"
 
 
+#: Faces of a revealed card. Everything the card knows gets a whole screen instead of a
+#: share of one, which is what makes room for material the old layout had nowhere to put.
+def card_tabs(card: dict, entry: dict, kind: str) -> list[str]:
+    tabs = ["answer"]
+    if look_entries(card) and kind != "locate":
+        tabs.append("routes")
+    if read_card_note(entry["name"], card["id"]):
+        tabs.append("note")
+    return tabs + ["why", "question"]
+
+
+def render_tab_row(tabs: list[str], active: int, width: int) -> str:
+    out = []
+    for n, name in enumerate(tabs):
+        out.append(f"{sgr(109)}{C['bold']}{name}{C['reset']}" if n == active
+                   else f"{C['dim']}{name}{C['reset']}")
+    return "  " + f" {C['dim']}│{C['reset']} ".join(out)
+
+
+def render_why(card: dict, deck: dict, cs: dict, churn: tuple[dict, float], width: int) -> list[str]:
+    """Why this card is in front of you, in the scheduler's own numbers.
+
+    None of this was ever shown, and all of it was already computed. An order nobody can see
+    the reasons for is one people work around rather than trust.
+    """
+    parts = score_parts(card, deck, cs, churn)
+    out = [f"  {C['dim']}queue score · lower sorts earlier{C['reset']}", ""]
+    for what, delta, why in parts:
+        out.append(f"  {what:<28}{sgr(114) if delta < 0 else C['dim']}{delta:>+6.2f}{C['reset']}  "
+                   f"{C['dim']}{why}{C['reset']}")
+    total = sum(d for _w, d, _y in parts)
+    out += [f"  {'':<28}{C['dim']}{'─' * 6}{C['reset']}",
+            f"  {'':<28}{C['bold']}{total:>+6.2f}{C['reset']}",
+            wrap(f"plus jitter up to {JITTER}, so a lower-priority card wins some days and "
+                 f"you are not drilling the same fifteen in the same order forever.",
+                 width, "  ", style=C["dim"]), ""]
+
+    seen, lapses = cs.get("seen", 0), cs.get("lapses", 0)
+    line = f"seen {seen}×"
+    if lapses:
+        line += f" · missed {lapses}×"
+        if lapses >= STICKY_LAPSES:
+            line += ", which drift lists as a card to rewrite"
+    if last := cs.get("last_seen"):
+        line += f" · last seen {last}"
+    out.append(wrap(line, width, "  ", style=C["dim"]))
+    if history := cs.get("history"):
+        marks = " ".join(f"{sgr(114)}✓{C['reset']}" if g == "y" else f"{sgr(203)}✗{C['reset']}"
+                         for g in history[-16:])
+        out.append(f"  {marks}")
+    if stamp := card.get("verified"):
+        out.append(f"  {C['dim']}verified against {stamp}{C['reset']}")
+    return out
+
+
 def key_hint(key: str, label: str, colour: int) -> str:
     return f"{sgr(colour)}{key}{C['reset']} {C['dim']}{label}{C['reset']}"
 
@@ -1729,8 +1811,8 @@ def card_keys(kind: str, cs: dict, revealed: bool, mode: str) -> str:
     elif not revealed:
         parts = [nav, key_hint("enter", "flip", 109), key_hint("t", "type", 79), flag, helps]
     else:
-        parts = [nav, key_hint("y", "got it", 114), key_hint("n", "missed", 203),
-                 key_hint("e", "note", 109), helps]
+        parts = [nav, key_hint("↑/↓", "tabs", 109), key_hint("y", "got it", 114),
+                 key_hint("n", "missed", 203), key_hint("e", "note", 109), helps]
     return f" {C['dim']}·{C['reset']} ".join(parts)
 
 
@@ -1744,7 +1826,7 @@ def card_state_mark(cs: dict, grade: str | None) -> str:
 
 
 def draw_card(queue, i, kind, root, cs, revealed, grade, mode="test", typing=None,
-              checked=None) -> None:
+              checked=None, tab=0) -> None:
     entry, card, _state, _deck, _churn = queue[i]
     cols, _rows = shutil.get_terminal_size((90, 24))
     width, _left = page_layout(cols)
@@ -1776,23 +1858,30 @@ def draw_card(queue, i, kind, root, cs, revealed, grade, mode="test", typing=Non
     else:
         # One dim line of what was asked. You grade yourself against the question, so it
         # cannot leave the screen, but it has done its work and the answer needs the space.
-        body += [f"  {C['dim']}{one_line(card.get('q', ''), text_width - 2)}{C['reset']}", ""]
-        if checked and checked.get("parts") is not None:
-            body += render_check(checked["parts"], text_width)
-            body += [f"  {C['dim']}marked from what you typed · y or n overrides{C['reset']}", ""]
-        elif checked:
-            body += render_overlap(checked["typed"], checked["overlap"], text_width) + [""]
-        body += render_answer(card, kind, text_width, root) + [""]
-        anchor = str(card.get("anchor", "-"))
-        body += [f"  {C['dim']}⚓{C['reset']}  {link(anchor, root, anchor)}"]
-        if note := read_card_note(entry["name"], card["id"]):
-            lines = note.split("\n")
-            body += [""]
-            body += [f"  {sgr(109)}✎{C['reset']}  " + wrap(lines[0], text_width, "     ",
-                                                          style=C["dim"])[5:]]
-            body += [wrap(ln, text_width, "     ", style=C["dim"]) for ln in lines[1:NOTE_LINES]]
-            if len(lines) > NOTE_LINES:
-                body.append(f"     {C['dim']}+{len(lines) - NOTE_LINES} more line(s){C['reset']}")
+        tabs = card_tabs(card, entry, kind)
+        active = tabs[tab % len(tabs)]
+        body += [f"  {C['dim']}{one_line(card.get('q', ''), text_width - 2)}{C['reset']}", "",
+                 render_tab_row(tabs, tab % len(tabs), text_width), ""]
+
+        if active == "answer":
+            if checked and checked.get("parts") is not None:
+                body += render_check(checked["parts"], text_width)
+                body += [f"  {C['dim']}marked from what you typed · y or n overrides{C['reset']}", ""]
+            elif checked:
+                body += render_overlap(checked["typed"], checked["overlap"], text_width) + [""]
+            body += render_answer(card, kind, text_width, root) + [""]
+            anchor = str(card.get("anchor", "-"))
+            body += [f"  {C['dim']}⚓{C['reset']}  {link(anchor, root, anchor)}"]
+        elif active == "routes":
+            body += route_lines(card, root, text_width)
+        elif active == "note":
+            body += [wrap(ln, text_width, "  ", style=C["dim"])
+                     for ln in read_card_note(entry["name"], card["id"]).split("\n")]
+            body += ["", f"  {C['dim']}{card_note_path(entry['name'], card['id'])}{C['reset']}"]
+        elif active == "why":
+            body += render_why(card, _deck, cs, _churn, text_width)
+        else:
+            body += [wrap(str(card.get("q", "")), text_width, "  ", style=C["bold"])]
     if typing is not None:
         label, buf = typing
         body += ["", f"  {sgr(179)}{label}{C['reset']} {buf}\u2588"]
@@ -1843,6 +1932,9 @@ def finish_session(queue, graded: dict[int, str], dirty: dict[str, dict] | None 
         cs = card_state(state, card["id"])
         cs["seen"] += 1
         cs["last_seen"] = today().isoformat()
+        # The only record of how this card has actually gone. Capped, because it is a shape
+        # to glance at rather than an audit trail.
+        cs["history"] = (cs.get("history", "") + grade)[-HISTORY_LEN:]
         if grade == "y":
             right += 1
             cs["box"] = min(cs["box"] + 1, MAX_BOX)

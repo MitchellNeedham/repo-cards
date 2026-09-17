@@ -106,7 +106,34 @@ Then one card at a time, sized to its content and centred:
 ╰─ ←/→ move · y got it · n missed · l learn · q quit ─────────╯
 ```
 
-`←`/`→` move, `enter` reveals, `y`/`n` grade. Boxes 1 to 5, due after 1, 2, 4, 8 and 16 days; a
+`←`/`→` move between cards, `enter` flips, `y`/`n` grade. A flipped card has tabs on `↑`/`↓`:
+the answer, the routes, your note, the full question, and **why it is in front of you**.
+
+```
+  billing · recall                                    4/22 · box 2 · ★★★
+  ────────────────────────────────────────────────────────────────────────
+    ADR-7: enqueue writes an empty payload. Why is the outbox row blank?
+
+    answer │ routes │ note │ why │ question
+
+    queue score · lower sorts earlier
+
+    priority 1                   +0.00  foundational
+    anchor moved 12× in 180d     -0.35  against this deck's p90 of 14
+    overdue 8d                   -0.40  the starvation guard, capped at 3.5
+                                ──────
+                                 -0.75
+
+    seen 6× · missed 3×, which drift lists as a card to rewrite
+    ✓ ✗ ✓ ✓ ✗ ✓ ✗ ✓
+  ────────────────────────────────────────────────────────────────────────
+  ←/→ move · ↑/↓ tabs · y got it · n missed · e note · ? keys
+```
+
+Every number there was already being computed and none of it was ever shown. The panel is
+built from the same parts the sort is, so it cannot drift from the ordering it explains.
+
+ Boxes 1 to 5, due after 1, 2, 4, 8 and 16 days; a
 miss drops to box 1, because a fact you have lost is not most of the way to known.
 
 **`f` flags a card you do not believe**, and asks why. "I forgot this" and "this is not true any
