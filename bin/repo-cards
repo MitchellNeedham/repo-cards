@@ -96,6 +96,14 @@ REGEN_DEAD_FRACTION = 0.25
 # the question is recognisable rather than answerable.
 STICKY_LAPSES = 3
 
+#: Every `git log` that asks which files moved needs these. A merge commit lists no files at
+#: all by default, so on a repo where work lands through merge requests the answer comes back
+#: empty: the merge shows no files, and the branch's own commits are dated when the work was
+#: done rather than when it landed, so they fall outside the window too. Asking for the files
+#: each merge brought in, against its first parent, counts a landed change once and dates it
+#: when it landed.
+LOG_FILES = ("--first-parent", "-m")
+
 CHURN_WINDOW_DAYS = 180
 CHURN_FLOOR = 3
 CHURN_WEIGHT = 0.5
@@ -347,7 +355,7 @@ def repo_churn(root: Path, days: int = CHURN_WINDOW_DAYS) -> dict[str, int]:
     key = (str(root), days)
     if key in _CHURN_CACHE:
         return _CHURN_CACHE[key]
-    out = git(root, "log", f"--since={days} days ago", "--name-only", "--pretty=format:")
+    out = git(root, "log", *LOG_FILES, f"--since={days} days ago", "--name-only", "--pretty=format:")
     counts: dict[str, int] = {}
     for line in out.split("\n"):
         if line := line.strip():
@@ -454,7 +462,7 @@ def repo_touch(root: Path, days: int) -> dict[str, int]:
     key = (str(root), days)
     if key in _TOUCH_CACHE:
         return _TOUCH_CACHE[key]
-    out = git(root, "log", f"--since={days} days ago", "--name-only", "--pretty=format:%x00%ct")
+    out = git(root, "log", *LOG_FILES, f"--since={days} days ago", "--name-only", "--pretty=format:%x00%ct")
     touched: dict[str, int] = {}
     stamp = 0
     for line in out.split("\n"):
@@ -1635,7 +1643,7 @@ def changed_since_date(root: Path, since: str) -> set[str]:
     """
     key = (str(root), since)
     if key not in _CHANGED_SINCE:
-        out = git(root, "log", f"--since={since_arg(since)}", "--name-only", "--format=")
+        out = git(root, "log", *LOG_FILES, f"--since={since_arg(since)}", "--name-only", "--format=")
         _CHANGED_SINCE[key] = {ln.strip() for ln in out.split("\n") if ln.strip()}
     return _CHANGED_SINCE[key]
 
@@ -1759,7 +1767,8 @@ def drift_facts(entry: dict) -> dict:
             if local:
                 patch = git(root, "diff", "-U5", f"{base}..HEAD", "--", path)
             else:
-                patch = git(registry_roots()[repo], "log", f"--since={since_arg(since or deck_since)}",
+                patch = git(registry_roots()[repo], "log", *LOG_FILES,
+                            f"--since={since_arg(since or deck_since)}",
                             "--format=", "-U5", "-p", "--", path)
             diff_cache[(repo, path, base)] = patch
         # Hunk headers carry the enclosing function name, so a symbol absent from the
@@ -2181,7 +2190,7 @@ def commits_since(root: Path, since: str) -> list[tuple[str, int, str, set[str]]
     One call per repo. NUL separates commits and unit separator splits the header, because
     a commit subject can contain anything and a filename can look like a header line.
     """
-    out = git(root, "log", f"--since={since_arg(since)}", "--name-only",
+    out = git(root, "log", *LOG_FILES, f"--since={since_arg(since)}", "--name-only",
               "--format=%x00%h%x1f%ct%x1f%s")
     commits = []
     for chunk in out.split("\x00"):

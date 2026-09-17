@@ -124,7 +124,9 @@ card with good routes is asked that way about one time in six.
 
 **Topics** are curated reading orders, plus `last-week` and `last-month`, which are built from git
 history: the cards whose anchor a commit touched in that window, newest first. Those two need no
-maintenance and are the fastest way back in after time away.
+maintenance and are the fastest way back in after time away. Work that landed through a merge is
+dated when it landed, not when it was written, so a branch merged this morning counts as this
+week however long it sat.
 
 **`catchup` is the other half of coming back.** Its baseline is the last time you *reviewed* a
 deck, not the last time the deck was updated, so it answers what the repo did while you were on

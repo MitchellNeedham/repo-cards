@@ -98,3 +98,44 @@ def test_a_window_covering_the_whole_deck_is_not_a_filter(rc, worked_on, deck_fa
     worked_on.commit("Reformat everything", days_ago=1)
     deck, _cards = rc.load_deck(entry)
     assert "last-week" not in rc.all_topics(deck)
+
+
+class TestMergeWorkflow:
+    """Work that lands through a merge request, which is most work on most teams.
+
+    A merge commit lists no files of its own, and the branch's commits are dated when the
+    work was done rather than when it landed. Read plainly, a week of merged branches looks
+    like a week in which nothing was touched.
+    """
+
+    @pytest.fixture
+    def merged(self, worked_on):
+        worked_on.git("checkout", "-q", "-b", "feature")
+        worked_on.write("src/mod.py", "def alpha():\n    return 111\n")
+        # A file that exists nowhere else, so churn cannot find it via an earlier commit.
+        worked_on.write("src/feature.py", "def gamma():\n    return 3\n")
+        # Older than the churn window, so every assertion below is about the merge
+        # carrying the work rather than about the branch commit being found on its own.
+        worked_on.commit("Work done long before it landed", days_ago=200)
+        worked_on.git("checkout", "-q", "main")
+        worked_on.merge("feature", "Merge branch 'feature'", days_ago=1)
+        return worked_on
+
+    def test_a_merge_carries_the_files_it_brought_in(self, rc, merged):
+        commits = rc.commits_since(merged.path, (rc.today() - dt.timedelta(days=3)).isoformat())
+        assert any("src/mod.py" in c[3] for c in commits)
+
+    def test_the_changed_set_sees_merged_work(self, rc, merged):
+        since = (rc.today() - dt.timedelta(days=3)).isoformat()
+        assert "src/mod.py" in rc.changed_since_date(merged.path, since)
+
+    def test_computed_topics_see_merged_work(self, rc, merged, deck_factory, card):
+        entry = deck_factory(merged, [card("a", anchor="src/mod.py#alpha"),
+                                      card("b", anchor="src/other.py#beta"),
+                                      card("c", anchor="src/other.py#beta"),
+                                      card("d", anchor="src/other.py#beta")])
+        deck, _cards = rc.load_deck(entry)
+        assert rc.all_topics(deck)["last-week"]["cards"] == ["a"]
+
+    def test_churn_counts_merged_work(self, rc, merged):
+        assert rc.repo_churn(merged.path).get("src/feature.py", 0) >= 1

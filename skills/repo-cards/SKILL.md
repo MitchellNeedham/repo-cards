@@ -352,7 +352,8 @@ repo-cards test             # the default: answer hidden, self-graded
 ```
 
 **`last-week` and `last-month` are computed topics**, not ones to write. Membership is "this
-card's anchor was touched by a commit in that window", read from git, newest first. They need no
+card's anchor was touched by a commit in that window", read from git, newest first, counting work
+merged in that window as landing then rather than when the branch was written. They need no
 maintenance and cannot go stale, but they are a reason to **anchor on the file that actually
 changes** rather than a stable summary of it: an anchor nothing commits to will never appear in
 either.

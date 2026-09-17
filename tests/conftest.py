@@ -70,6 +70,18 @@ class Repo:
                             "GIT_AUTHOR_DATE": when, "GIT_COMMITTER_DATE": when})
         return self.head()
 
+    def merge(self, branch: str, message: str, days_ago: int = 0) -> str:
+        """Land a branch the way a merge request does: a merge commit dated now, over work
+        dated whenever it was done."""
+        when = (dt.datetime.now() - dt.timedelta(days=days_ago)).isoformat()
+        subprocess.run(["git", "-C", str(self.path), "merge", "--no-ff", "-q", "-m", message, branch],
+                       check=True, capture_output=True,
+                       env={"PATH": "/usr/bin:/bin", "HOME": str(self.path),
+                            "GIT_AUTHOR_NAME": "Test", "GIT_AUTHOR_EMAIL": "test@example.com",
+                            "GIT_COMMITTER_NAME": "Test", "GIT_COMMITTER_EMAIL": "test@example.com",
+                            "GIT_AUTHOR_DATE": when, "GIT_COMMITTER_DATE": when})
+        return self.head()
+
     def head(self) -> str:
         return self.git("rev-parse", "--short", "HEAD")
 
