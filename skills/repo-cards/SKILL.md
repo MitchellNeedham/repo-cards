@@ -362,6 +362,11 @@ repo-cards learn            # everything visible, nothing graded
 repo-cards test             # the default: answer hidden, self-graded
 ```
 
+**The mode is chosen before the first card and fixed for the session**, either by naming it here
+or with `m` in the picker. It does not switch mid-run, because what a session was is part of what
+its grades mean. Somebody who realises they do not know an area should quit and start again in
+`learn`, or read it with `brief`.
+
 **`last-week` and `last-month` are computed topics**, not ones to write. Membership is "this
 card's anchor was touched by a commit in that window", read from git, newest first, counting work
 merged in that window as landing then rather than when the branch was written. They need no
@@ -369,7 +374,7 @@ maintenance and cannot go stale, but they are a reason to **anchor on the file t
 changes** rather than a stable summary of it: an anchor nothing commits to will never appear in
 either.
 
-A revealed card has tabs, moved between with `↑`/`↓`: the answer, the routes, your note, the
+A flipped card has tabs, moved between with `↑`/`↓`: the answer, the routes, your note, the
 full question, and **why** this card is in front of you. That last one prints the queue score
 the scheduler actually used, broken into its parts: the priority tier, days overdue, how much
 the anchor has moved, and how it compares to the rest of the deck. Point somebody at it when

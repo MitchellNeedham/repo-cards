@@ -64,11 +64,11 @@ From Claude Code, inside the repo you want carded:
 That is the whole setup. `update` verifies every card whose source moved before it adds anything,
 and with no argument it sweeps every registered repo.
 
-Then `repo-cards` asks what to review. Both lists scroll, with paging and `home`/`end`, and your
-choice is remembered for next time.
+Then `repo-cards` asks what to review, and which mode to review in. Both lists scroll, with
+paging and `home`/`end`, and your choice is remembered for next time.
 
 ```
-╭─ Which decks? 2/4 selected ───────────────────────────────╮
+╭─ Which decks? 2/4 selected · test ────────────────────────╮
 │                                                           │
 │  ❯ ◉ billing        77 cards   12 due →   all topics      │
 │    ◉ checkout       84 cards    9 due →   last-week       │
@@ -77,134 +77,154 @@ choice is remembered for next time.
 │    no deck: search-api, ingest +2                         │
 │    /repo-cards:generate                                   │
 │                                                           │
-╰─ ↑/↓ move · space toggle · → topics · enter start ────────╯
+╰─ ↑/↓ move · space toggle · → topics · m mode · enter ─────╯
 ```
 
-Then one card at a time, sized to its content and centred:
+**Two modes, chosen here and fixed for the session.** `test` hides the answer and is the only one
+that moves a card's box. `learn` shows everything and grades nothing. `m` switches between them
+before you start, and nothing switches once you have: what a session was is part of what its
+grades mean, and a run that changed halfway is neither thing.
+
+Then one card at a time. A card has two faces, because on a real deck the question, its routes,
+the answer, the anchor and your note come to 23 rows against the 21 a terminal gives you:
 
 ```
-╭─ billing · recall ─────────────────────── 4/22  box 2  ★★★ ─╮
-│                                                             │
-│   ▌payouts  ▌last-week                                      │
-│                                                             │
-│   ADR-7: enqueue writes an empty payload. Why is the        │
-│   outbox row blank, and what does that make it?             │
-│                                                             │
-│   → src/billing/outbox.py#enqueue                           │
-│     the empty payload, and the comment arguing it           │
-│   → docs/adr/adr-7-outbox.md                                │
-│     the decision, and what it rejected                      │
-│                                                             │
-├─────────────────────────────────────────────────────────────┤
-│                                                             │
-│   It makes the message a prompt, not a snapshot. The row    │
-│   says this invoice changed; the bytes are rendered at      │
-│   send time.                                                │
-│                                                             │
-│   anchor  src/billing/outbox.py#enqueue                     │
-│                                                             │
-╰─ ←/→ move · y got it · n missed · l learn · q quit ─────────╯
-```
-
-`←`/`→` move between cards, `enter` flips, `y`/`n` grade. A flipped card has tabs on `↑`/`↓`:
-the answer, the routes, your note, the full question, and **why it is in front of you**.
-
-```
-  billing · recall                                    4/22 · box 2 · ★★★
-  ●●●◉○○○○○○○○○○○○○○○○○○
+  billing · recall                                         1/2  box 2  ★★★
+    ◉○
   ────────────────────────────────────────────────────────────────────────
-    ADR-7: enqueue writes an empty payload. Why is the outbox row blank?
+
+    ▌payouts
+
+    ADR-7: enqueue writes an empty payload. Why is the outbox row blank,
+    and what does that make it?
+
+    → src/billing/outbox.py#enqueue
+      the empty payload, and the comment arguing it
+    → docs/adr/adr-7-outbox.md
+      the decision, and what it rejected
+
+  ────────────────────────────────────────────────────────────────────────
+  ←/→ move · enter flip · t type · f flag · ? keys
+```
+
+`enter` flips it. The question stays as one dim line, because you grade yourself against what was
+asked, and the routes give way to the answer:
+
+```
+  billing · recall                                         1/2  box 2  ★★★
+    ◉○
+  ────────────────────────────────────────────────────────────────────────
+
+    ADR-7: enqueue writes an empty payload. Why is the outbox row blank…
 
     answer │ routes │ note │ why │ question
 
-    queue score · lower sorts earlier
+    It makes the message a prompt, not a snapshot. The row says this
+    invoice changed; the bytes are rendered at send time from the
+    invoice as it is then, so a queued payload would go out stale.
 
-    priority 1                   +0.00  foundational
-    anchor moved 12× in 180d     -0.35  against this deck's p90 of 14
-    overdue 8d                   -0.40  the starvation guard, capped at 3.5
-                                ──────
-                                 -0.75
+    ⚓  src/billing/outbox.py#enqueue
 
-    seen 6× · missed 3×, which drift lists as a card to rewrite
-    ✓ ✗ ✓ ✓ ✗ ✓ ✗ ✓
   ────────────────────────────────────────────────────────────────────────
   ←/→ move · ↑/↓ tabs · y got it · n missed · e note · ? keys
 ```
 
-Every number there was already being computed and none of it was ever shown. The panel is
-built from the same parts the sort is, so it cannot drift from the ordering it explains.
+`←`/`→` move between cards and `↑`/`↓` move between a card's tabs. The row of pips under the
+header is the session: green for right, red for missed, amber for flagged, hollow for still to
+come. `1/2` says where you are; the strip says how it has been going.
 
-The row of pips under the header is the session: green for right, red for missed, amber for
-flagged, hollow for still to come. `4/22` tells you where you are; the strip tells you how it
-has been going, which is the thing worth knowing before you keep sitting there.
+Boxes 1 to 5, due after 1, 2, 4, 8 and 16 days; a miss drops to box 1, because a fact you have
+lost is not most of the way to known.
 
- Boxes 1 to 5, due after 1, 2, 4, 8 and 16 days; a
-miss drops to box 1, because a fact you have lost is not most of the way to known.
-
-**`f` flags a card you do not believe**, and asks why. "I forgot this" and "this is not true any
-more" are different facts and only the second one is a defect, so a flag grades nothing. The note
-goes with it:
+**The `why` tab says why this card is in front of you**, in the numbers the scheduler actually
+used:
 
 ```
-╭─ billing · recall ──────────────────────────────────────────╮
-│   ADR-7: enqueue writes an empty payload. Why is the        │
-│   outbox row blank, and what does that make it?             │
-│                                                             │
-│   why? rendered in the worker now, not at send time█        │
-╰─ ←/→ move · enter reveal · l learn · f unflag · q quit ─────╯
+    queue score · lower sorts earlier
+
+    priority 1                   +0.00  foundational
+    overdue 8d                   -0.40  starvation guard, capped at 3.5
+                                ──────
+                                 -0.40
+    plus jitter up to 1.4, so a lower-priority card wins some days and
+    you are not drilling the same fifteen in the same order forever.
+
+    seen 6× · missed 3×, which drift lists as a card to rewrite · last
+    seen 2026-09-09
+    ✓ ✗ ✓ ✓ ✗ ✓ ✗ ✓
+```
+
+All of it was already being computed and none of it was ever shown. The panel is built from the
+same parts the sort is, so it cannot drift from the ordering it explains.
+
+**`f` flags a card you do not believe**, and asks why. "I forgot this" and "this is not true any
+more" are different facts and only the second one is a defect, so a flag grades nothing:
+
+```
+    ADR-7: enqueue writes an empty payload. Why is the outbox row blank,
+    and what does that make it?
+
+    why? rendered in the worker now, not at send time█
 ```
 
 It lands at the top of the next `drift`, in your own words, and is the first thing an update looks
 at. That is how review feeds the deck rather than only consuming it, and it catches what git
 cannot: a card that was wrong the day it was written.
 
-**Two modes.** `test` (the default) hides the answer and is the only one that moves a card's box.
-`learn` shows everything and grades nothing. `l` switches mid-session.
-
-**`e` keeps your own note on a card**, in `$EDITOR` or as a typed line:
-
-```
-│   anchor  src/billing/outbox.py#enqueue                     │
-│                                                             │
-│   your note                                                 │
-│   bit me on the backfill in August: the replay re-rendered  │
-│   at today's rates                                          │
-```
-
-The deck says what the repo decided. The note says what it cost you, which is why it lives beside
-the deck rather than in it: an update rewrites cards and never touches your notes. They show under
-the answer and in `brief`, travel with `export`, and follow a card through a rename.
+**`e` keeps your own note on a card**, in `$EDITOR` or as a typed line. The deck says what the repo
+decided; the note says what it cost you, which is why it lives beside the deck rather than in it.
+An update rewrites cards and never touches your notes. They show on the card's `note` tab and in
+`brief`, travel with `export`, and follow a card through a rename.
 
 **Not every card is a plain question.** `cloze` blanks out the load-bearing words, `order` shuffles
 a sequence, and `locate` asks *where you would look*, treating the routes as the answer. A recall
 card with good routes is asked that way about one time in six.
 
-**Those three can be typed and marked** with `t`, because their answers are short and exact:
+**Those three can be typed and marked** with `t`, because their answers are short and exact. A
+cloze is filled in place, one blank at a time, because the words either side are most of what tells
+you which word belongs there:
 
 ```
-╭─ billing · fill the blanks ──────────────── 4/22  box 2  ★★★ ─╮
-│   The ledger is ▁▁▁▁▁▁▁▁▁▁▁▁▁; the projection is written      │
-│   ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁.                                         │
-│                                                               │
-│   2? in one transaction█                                      │
-├───────────────────────────────────────────────────────────────┤
-│   ✓ authoritative                                             │
-│   ✗ in the same transaction                                   │
-│       you said: in one transaction                            │
-│                                                               │
-│   marked from what you typed · y or n overrides               │
-╰─ ←/→ move · y got it · n missed · l learn · f flag · q quit ──╯
+    How does the ledger relate to the projection?
+
+    The ledger is authoritative; the projection is written
+    in one transa█.
+
+    blank 2 of 2 · enter to fill it · esc to give up
+```
+
+```
+    ✓ authoritative
+    ✗ in the same transaction
+        you said: in one transaction
+
+    marked from what you typed · y or n overrides
 ```
 
 A typo passes, a different word does not, and the mark moves the box like any other grade.
 
-On a **prose** card `t` measures instead of marking: it shows how much of the answer's content your
-words covered, and you still grade yourself. That line is drawn on purpose. On a card whose answer
-is a *why*, "blank to save space" and "blank because it is a prompt, not a snapshot" look alike to
-any string comparison, and one of them is the defect the card exists to prevent. `rapidfuzz` would
-match better and `model2vec` would match meaning in thirty megabytes without an LLM; neither is
-reached for, because the accuracy they buy is not the accuracy this needs, and both cost the
-instant offline start that gets the tool run each morning.
+On a **prose** card `t` measures instead of marking, and names the words you did not produce:
+
+```
+    you said
+    the row says it changed and the bytes come later
+
+    the card says
+    It makes the message a prompt, not a snapshot. The row says this
+    invoice changed; the bytes are rendered at send time from the
+    invoice as it is then, so a queued payload would go out stale.
+
+    ~25% of its content words
+    you did not say: makes, message, prompt, snapshot, invoice,
+    rendered, send, time
+```
+
+You still grade yourself, and that line is drawn on purpose. On a card whose answer is a *why*,
+"blank to save space" and "blank because it is a prompt, not a snapshot" look alike to any string
+comparison, and one of them is the defect the card exists to prevent. `rapidfuzz` would match
+better and `model2vec` would match meaning in thirty megabytes without an LLM; neither is reached
+for, because the accuracy they buy is not the accuracy this needs, and both cost the instant
+offline start that gets the tool run each morning.
 
 **Topics** are curated reading orders, plus `last-week` and `last-month`, which are built from git
 history: the cards whose anchor a commit touched in that window, newest first. Those two need no

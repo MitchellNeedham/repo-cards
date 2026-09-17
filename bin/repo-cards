@@ -480,7 +480,7 @@ def score_parts(card: dict, deck: dict, cs: dict,
         overdue = 0
     if overdue > 0:
         parts.append((f"overdue {overdue}d", -min(overdue * OVERDUE_PER_DAY, OVERDUE_CAP),
-                      f"the starvation guard, capped at {OVERDUE_CAP}"))
+                      f"starvation guard, capped at {OVERDUE_CAP}"))
     return parts
 
 
@@ -1408,7 +1408,7 @@ def pick_session(args) -> dict[str, set[str] | None] | None:
     try:
         while True:
             if view == "repos":
-                repo_off = draw_repo_picker(decks, chosen, row, repo_off, undecked)
+                repo_off = draw_repo_picker(decks, chosen, row, repo_off, undecked, args.mode)
             else:
                 topic_off = draw_topic_picker(decks[row], chosen, topic_row, topic_off)
             key = read_key()
@@ -1429,6 +1429,9 @@ def pick_session(args) -> dict[str, set[str] | None] | None:
                 elif key in ("pgdn", "end", "G"):
                     row = (len(decks) - 1 if key in ("end", "G")
                            else min(len(decks) - 1, row + page))
+                elif key == "m":
+                    args.mode = "learn" if args.mode == "test" else "test"
+                    save_prefs(mode=args.mode)
                 elif key == " ":
                     name = decks[row]["entry"]["name"]
                     chosen.pop(name, None) if name in chosen else chosen.update({name: None})
@@ -1542,7 +1545,7 @@ def command_hints(decks, undecked) -> list[str]:
     return ([""] + out) if out else []
 
 
-def draw_repo_picker(decks, chosen, row, offset, undecked=()) -> int:
+def draw_repo_picker(decks, chosen, row, offset, undecked=(), mode="test") -> int:
     height = picker_height()
     offset, start, end = scroll_window(len(decks), row, offset, height)
     out = []
@@ -1560,9 +1563,10 @@ def draw_repo_picker(decks, chosen, row, offset, undecked=()) -> int:
         out.append(f" {cursor} {box} {name_colour(name)}{name:<16}{C['reset']}{stale} "
                    f"{C['dim']}{len(d['cards']):>4} cards{C['reset']}  {due}{more}  {detail}")
     _frame(f"{C['bold']}Which decks?{C['reset']} "
-           f"{C['dim']}{len(chosen)}/{len(decks)} selected{C['reset']}",
+           f"{C['dim']}{len(chosen)}/{len(decks)} selected ·{C['reset']} "
+           f"{sgr(214 if mode == 'learn' else 79)}{mode}{C['reset']}",
            _indicators(out, offset, end, len(decks)) + command_hints(decks, undecked),
-           "↑/↓ move · space toggle · → topics · enter start · q cancel")
+           "↑/↓ move · space toggle · → topics · m mode · enter start · q cancel")
     return offset
 
 
@@ -1680,12 +1684,14 @@ def cmd_review(args) -> int:
 def run_session(queue: list[tuple], mode: str = "test") -> int:
     """One pass over the queue, navigable. Grades are held until the session ends.
 
-    Two modes, because reading and being tested are different activities and doing both in
-    one screen means doing neither well. **learn** shows everything at once and grades
-    nothing: it is for building the picture, or meeting what an update just changed.
-    **test** hides the answer until you have had a go, and is the only one that moves a
-    card's box. `l` switches mid-session, because realising you do not know an area is
-    exactly when you want to stop testing and start reading.
+    Two modes, chosen before the first card and fixed for the session. **learn** shows
+    everything at once and grades nothing: it is for building the picture, or meeting what an
+    update just changed. **test** hides the answer until you have had a go, and is the only
+    one that moves a card's box.
+
+    Fixed rather than switched mid-run, because what a session was is part of what its grades
+    mean. A run that changed halfway is neither of the two things, and the boxes carry the
+    difference for weeks afterwards.
     """
     roots = {e["name"]: Path(e["root"]).expanduser() for e, *_ in queue}
     kinds = {c["id"]: kind_of(c) for _, c, *_ in queue}
@@ -1729,9 +1735,6 @@ def run_session(queue: list[tuple], mode: str = "test") -> int:
                 else:
                     cs.pop("flag_note", None)
                 dirty[entry["name"]] = state
-            elif key == "l":
-                mode = "learn" if mode == "test" else "test"
-                save_prefs(mode=mode)
             elif key in ("up", "down") and (mode == "learn" or i in revealed):
                 # Cards move on the horizontal, a card's own faces on the vertical.
                 n = len(card_tabs(card, entry, kind))
@@ -1895,7 +1898,7 @@ def card_keys(kind: str, cs: dict, revealed: bool, mode: str) -> str:
     flag = key_hint("f", "unflag" if cs.get("flagged") else "flag", 179)
     helps = key_hint("?", "keys", 245)
     if mode == "learn":
-        parts = [nav, key_hint("l", "test", 214), flag, key_hint("e", "note", 109), helps]
+        parts = [nav, key_hint("↑/↓", "tabs", 109), flag, key_hint("e", "note", 109), helps]
     elif not revealed:
         parts = [nav, key_hint("enter", "flip", 109), key_hint("t", "type", 79), flag, helps]
     else:
@@ -1925,10 +1928,10 @@ def draw_card(queue, i, kind, root, cs, revealed, grade, mode="test", typing=Non
     siblings = tuple(all_topics(_deck).keys())
     topics = topics_of(card, _deck)
 
-    shown_kind = "learn" if mode == "learn" else kind_label(kind)
-    kind_col = sgr(214 if mode == "learn" else KIND_COLOUR[kind])
     head = (f"{name_colour(repo)}{repo}{C['reset']} {C['dim']}·{C['reset']} "
-            f"{kind_col}{shown_kind}{C['reset']}")
+            f"{sgr(KIND_COLOUR[kind])}{kind_label(kind)}{C['reset']}")
+    if mode == "learn":
+        head += f" {C['dim']}·{C['reset']} {sgr(214)}learn{C['reset']}"
     head_right = (f"{C['dim']}{i + 1}/{len(queue)}{C['reset']}  "
                   f"{sgr(BOX_COLOUR[cs['box']])}box {cs['box']}{C['reset']}  "
                   f"{sgr(PRIORITY_COLOUR[pri])}{'★' * (4 - pri)}{C['reset']}")
