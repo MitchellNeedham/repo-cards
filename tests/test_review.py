@@ -274,3 +274,31 @@ class TestWhyThisCard:
         repo.commit("init")
         entry = deck_factory(repo, [card("a", anchor="src/mod.py#alpha")])
         assert "routes" not in rc.card_tabs({"id": "a", "look": {"a": "x", "b": "y"}}, entry, "locate")
+
+
+class TestQueueStrip:
+    """The session in one row."""
+
+    @staticmethod
+    def glyphs(rc, text):
+        return "".join(ch for ch in rc._INVISIBLE.sub("", text) if ch in "◉●○‹›")
+
+    def rows(self, rc, n, state=None):
+        card = {"id": "c"}
+        return [({"name": "r"}, {"id": f"c{i}"}, state or {}, {}, ({}, 0.0)) for i in range(n)]
+
+    def test_graded_missed_and_remaining_are_distinct(self, rc):
+        strip = rc.queue_strip(self.rows(rc, 4), 2, {0: "y", 1: "n"}, 60)
+        assert self.glyphs(rc, strip) == "●●◉○"
+
+    def test_a_flagged_card_shows_before_it_is_graded(self, rc):
+        rows = self.rows(rc, 3, state={"c2": {"flagged": "2026-09-17"}})
+        assert self.glyphs(rc, rc.queue_strip(rows, 0, {}, 60)) == "◉○●"
+
+    def test_a_long_queue_windows_around_where_you_are(self, rc):
+        strip = rc.queue_strip(self.rows(rc, 200), 100, {}, 40)
+        assert strip.startswith("  ") and "‹" in strip and "›" in strip
+        assert len(self.glyphs(rc, strip)) == 36   # 34 pips plus both edge marks
+
+    def test_the_start_of_a_long_queue_has_no_left_edge_mark(self, rc):
+        assert "‹" not in rc.queue_strip(self.rows(rc, 200), 0, {}, 40)

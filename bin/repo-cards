@@ -1660,7 +1660,7 @@ def run_session(queue: list[tuple], mode: str = "test") -> int:
             def redraw(typing=None):
                 draw_card(queue, i, kind, roots[entry["name"]], cs,
                           mode == "learn" or i in revealed, graded.get(i), mode,
-                          typing, checked.get(i), tabs.get(i, 0))
+                          typing, checked.get(i), tabs.get(i, 0), graded)
 
             redraw()
             key = read_key()
@@ -1797,6 +1797,35 @@ def render_why(card: dict, deck: dict, cs: dict, churn: tuple[dict, float], widt
     return out
 
 
+def queue_strip(queue, i: int, graded: dict, width: int) -> str:
+    """The whole session in one row: what you got, what you missed, what is left.
+
+    A count says 4/22 and nothing else. This says you have missed three of the last five,
+    which is the thing worth knowing before you keep going. Long queues show a window around
+    where you are rather than shrinking the pips to nothing.
+    """
+    room = max(10, width - 6)
+    start = 0
+    if len(queue) > room:
+        start = min(max(0, i - room // 2), len(queue) - room)
+    end = min(len(queue), start + room)
+
+    pips = []
+    for n in range(start, end):
+        _e, card, state, _d, _c = queue[n]
+        if n == i:
+            pips.append(f"{C['bold']}◉{C['reset']}")
+        elif (g := graded.get(n)) is not None:
+            pips.append(f"{sgr(114) if g == 'y' else sgr(203)}●{C['reset']}")
+        elif state.get(card["id"], {}).get("flagged"):
+            pips.append(f"{sgr(179)}●{C['reset']}")
+        else:
+            pips.append(f"{C['dim']}○{C['reset']}")
+    lead = f"{C['dim']}‹{C['reset']}" if start else ""
+    tail = f"{C['dim']}›{C['reset']}" if end < len(queue) else ""
+    return "  " + lead + "".join(pips) + tail
+
+
 def key_hint(key: str, label: str, colour: int) -> str:
     return f"{sgr(colour)}{key}{C['reset']} {C['dim']}{label}{C['reset']}"
 
@@ -1826,7 +1855,7 @@ def card_state_mark(cs: dict, grade: str | None) -> str:
 
 
 def draw_card(queue, i, kind, root, cs, revealed, grade, mode="test", typing=None,
-              checked=None, tab=0) -> None:
+              checked=None, tab=0, graded=None) -> None:
     entry, card, _state, _deck, _churn = queue[i]
     cols, _rows = shutil.get_terminal_size((90, 24))
     width, _left = page_layout(cols)
@@ -1887,7 +1916,8 @@ def draw_card(queue, i, kind, root, cs, revealed, grade, mode="test", typing=Non
         body += ["", f"  {sgr(179)}{label}{C['reset']} {buf}\u2588"]
 
     draw_page(head, head_right, body,
-              card_keys(kind, cs, revealed, mode), card_state_mark(cs, grade))
+              card_keys(kind, cs, revealed, mode), card_state_mark(cs, grade),
+              strip=queue_strip(queue, i, graded or {}, text_width) if len(queue) > 1 else "")
 
 
 # SGR colour codes and OSC 8 hyperlink wrappers both occupy no columns.

@@ -111,6 +111,7 @@ the answer, the routes, your note, the full question, and **why it is in front o
 
 ```
   billing · recall                                    4/22 · box 2 · ★★★
+  ●●●◉○○○○○○○○○○○○○○○○○○
   ────────────────────────────────────────────────────────────────────────
     ADR-7: enqueue writes an empty payload. Why is the outbox row blank?
 
@@ -132,6 +133,10 @@ the answer, the routes, your note, the full question, and **why it is in front o
 
 Every number there was already being computed and none of it was ever shown. The panel is
 built from the same parts the sort is, so it cannot drift from the ordering it explains.
+
+The row of pips under the header is the session: green for right, red for missed, amber for
+flagged, hollow for still to come. `4/22` tells you where you are; the strip tells you how it
+has been going, which is the thing worth knowing before you keep sitting there.
 
  Boxes 1 to 5, due after 1, 2, 4, 8 and 16 days; a
 miss drops to box 1, because a fact you have lost is not most of the way to known.
