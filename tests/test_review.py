@@ -347,3 +347,56 @@ class TestDiffAndInPlaceCloze:
         card = {"id": "c", "a": "The ledger is {{authoritative}}; written {{in one transaction}}."}
         out = rc._INVISIBLE.sub("", rc.cloze_sentence(card, [], 0, "auth"))
         assert "▁" in out.split(";")[1]
+
+
+class TestOpeningRoutes:
+    """`look` says go and check. The number key is that instruction carried out."""
+
+    @pytest.fixture
+    def carded(self, rc, repo, deck_factory, card, monkeypatch):
+        repo.write("src/mod.py", "def alpha():\n    return 1\n\n\ndef beta():\n    return 2\n")
+        repo.commit("init")
+        deck_factory(repo, [card("a", anchor="src/mod.py#beta")])
+        ran = []
+        monkeypatch.setattr(rc, "run_outside_screen", lambda argv: ran.append(argv) or True)
+        return repo, ran
+
+    def test_a_route_opens_in_the_viewer(self, rc, carded, monkeypatch):
+        repo, ran = carded
+        monkeypatch.setenv("EDITOR", "vim")
+        assert rc.open_ref("src/mod.py", repo.path) == ""
+        assert ran[0][0] == "vim" and ran[0][-1].endswith("src/mod.py")
+
+    def test_an_anchored_symbol_opens_at_its_line(self, rc, carded, monkeypatch):
+        repo, ran = carded
+        monkeypatch.setenv("EDITOR", "vim")
+        rc.open_ref("src/mod.py#beta", repo.path)
+        assert "+5" in ran[0]
+
+    def test_a_viewer_that_cannot_jump_is_not_given_a_line(self, rc, carded, monkeypatch):
+        repo, ran = carded
+        monkeypatch.setenv("EDITOR", "mystery-editor")
+        rc.open_ref("src/mod.py#beta", repo.path)
+        assert not any(a.startswith("+") for a in ran[0])
+
+    def test_a_path_that_is_gone_says_so_rather_than_opening_nothing(self, rc, carded, monkeypatch):
+        repo, _ran = carded
+        monkeypatch.setenv("EDITOR", "vim")
+        assert "no such path" in rc.open_ref("src/gone.py", repo.path)
+
+    def test_a_ref_into_an_unregistered_repo_says_which(self, rc, carded, monkeypatch):
+        repo, _ran = carded
+        monkeypatch.setenv("EDITOR", "vim")
+        assert "ghost is not registered" in rc.open_ref("ghost::src/mod.py", repo.path)
+
+    def test_a_cross_repo_route_resolves_through_the_registry(self, rc, carded, tmp_path, monkeypatch,
+                                                              deck_factory, card):
+        from conftest import Repo
+        repo, ran = carded
+        other = Repo(tmp_path / "other")
+        other.write("api/contract.py", "def handshake():\n    return 1\n")
+        other.commit("init")
+        deck_factory(other, [], name="other")
+        monkeypatch.setenv("EDITOR", "vim")
+        assert rc.open_ref("other::api/contract.py", repo.path) == ""
+        assert ran[0][-1].endswith("api/contract.py")

@@ -98,14 +98,20 @@ the answer, the anchor and your note come to 23 rows against the 21 a terminal g
     ADR-7: enqueue writes an empty payload. Why is the outbox row blank,
     and what does that make it?
 
-    → src/billing/outbox.py#enqueue
-      the empty payload, and the comment arguing it
-    → docs/adr/adr-7-outbox.md
-      the decision, and what it rejected
+    1 → src/billing/outbox.py#enqueue
+        the empty payload, and the comment arguing it
+    2 → docs/adr/adr-7-outbox.md
+        the decision, and what it rejected
 
   ────────────────────────────────────────────────────────────────────────
-  ←/→ move · enter flip · t type · f flag · ? keys
+  ←/→ move · enter flip · t type · 1-2 open · f flag · ? keys
 ```
+
+**The routes are numbered because the number opens them.** `1` opens that file in `$EDITOR`, at
+the line the anchored symbol is defined on where the editor takes `+N`, and drops you back on the
+card afterwards. A cross-repo route resolves through the registry and opens in the other checkout.
+`look` has always said go and check; this is that instruction carried out, rather than a link that
+only works if your terminal honours OSC 8.
 
 `enter` flips it. The question stays as one dim line, because you grade yourself against what was
 asked, and the routes give way to the answer:
@@ -129,7 +135,9 @@ asked, and the routes give way to the answer:
   ←/→ move · ↑/↓ tabs · y got it · n missed · e note · ? keys
 ```
 
-`←`/`→` move between cards and `↑`/`↓` move between a card's tabs. The row of pips under the
+`←`/`→` move between cards, `↑`/`↓` move between a card's tabs, and `?` shows every key and every
+mark on its own screen, so the row at the bottom only ever carries what is live on the face in
+front of you. The row of pips under the
 header is the session: green for right, red for missed, amber for flagged, hollow for still to
 come. `1/2` says where you are; the strip says how it has been going.
 

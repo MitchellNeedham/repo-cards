@@ -193,7 +193,8 @@ mark is a fact about the words, so `y` or `n` overrides it.
 
 `anchor` is one path, the place the fact is *defined*; drift tracks it precisely and churn is
 measured on it. `look` is the **route you would take to answer the question yourself**, and it is
-shown *under the question, before the answer*, so it can be followed, and it is what teaches the repo rather
+shown *under the question, before the answer*, numbered, so pressing that number opens the file in
+`$EDITOR` at the anchored symbol. It is what teaches the repo rather
 than the fact: the decision that argued it, the test that pins it, the caller that shows why it
 matters. Two or three entries, each saying what is there, not just where.
 

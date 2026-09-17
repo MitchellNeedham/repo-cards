@@ -208,28 +208,80 @@ def append_card_note(name: str, card_id: str, line: str) -> None:
     path.write_text((existing + "\n" if existing else "") + line.strip() + "\n")
 
 
-def edit_card_note(name: str, card_id: str) -> bool:
-    """Open the note in $EDITOR, stepping out of the alt screen while it runs.
+def run_outside_screen(argv: list[str]) -> bool:
+    """Hand the terminal over to another program and take it back afterwards.
 
-    False when there is no editor to open, which is the caller's cue to take a line instead.
-    Raw mode is already off here: `read_key` restores it before returning.
+    Raw mode is already off by the time this is called: `read_key` restores it before it
+    returns. The alt screen is not, so it is dropped and restored around the call, or the
+    editor draws over the card and the card draws over the editor.
     """
+    if FULLSCREEN:
+        sys.stdout.write(ALT_OFF)
+        sys.stdout.flush()
+    try:
+        subprocess.run(argv, check=False)
+    except (OSError, ValueError):
+        return False
+    finally:
+        if FULLSCREEN:
+            sys.stdout.write(ALT_ON)
+            sys.stdout.flush()
+    return True
+
+
+def edit_card_note(name: str, card_id: str) -> bool:
+    """Open the note in $EDITOR. False when there is none, which is the caller's cue to
+    take a typed line instead."""
     editor = os.environ.get("VISUAL") or os.environ.get("EDITOR")
     if not (editor and FULLSCREEN):
         return False
     path = card_note_path(name, card_id)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.touch(exist_ok=True)
-    sys.stdout.write(ALT_OFF)
-    sys.stdout.flush()
+    return run_outside_screen([*shlex.split(editor), str(path)])
+
+
+#: Viewers that take `+N` to open at a line. Enough of them that an anchored symbol usually
+#: lands where it lives rather than at the top of a 700-line module.
+LINE_JUMPERS = frozenset({"vim", "nvim", "vi", "view", "nano", "emacs", "emacsclient",
+                          "less", "more", "most", "joe", "pico"})
+
+
+def symbol_line(path: Path, symbol: str) -> int:
+    """The line a symbol is defined on, best effort. 0 when it cannot be found."""
     try:
-        subprocess.run([*shlex.split(editor), str(path)], check=False)
-    except (OSError, ValueError):
-        return False
-    finally:
-        sys.stdout.write(ALT_ON)
-        sys.stdout.flush()
-    return True
+        text = path.read_text(errors="replace")
+    except OSError:
+        return 0
+    pattern = re.compile(rf"\b{re.escape(symbol)}\b")
+    for n, line in enumerate(text.split("\n"), 1):
+        if pattern.search(line):
+            return n
+    return 0
+
+
+def open_ref(ref: str, root: Path) -> str:
+    """Open one of a card's routes. Returns "" on success, or why it could not.
+
+    `look` exists so you go and check, and until now that only worked if the terminal
+    honoured OSC 8 links. A key that opens the file is the same instruction, carried out.
+    """
+    other, rel = resolve_ref(ref, root)
+    if other is None:
+        return f"{ref.split('::')[0]} is not registered"
+    target = other / rel
+    if not target.exists():
+        return f"no such path: {rel}"
+    viewer = (os.environ.get("VISUAL") or os.environ.get("EDITOR")
+              or os.environ.get("PAGER") or "less")
+    argv = shlex.split(viewer)
+    if not argv:
+        return "no editor or pager set"
+    _, _, symbol = ref.partition("#")
+    if symbol and Path(argv[0]).name in LINE_JUMPERS and (n := symbol_line(target, symbol)):
+        argv.append(f"+{n}")
+    argv.append(str(target))
+    return "" if run_outside_screen(argv) else f"could not run {viewer}"
 
 
 def today() -> dt.date:
@@ -1208,12 +1260,12 @@ def route_lines(card: dict, root: Path, width: int) -> list[str]:
     that says why the path is worth opening.
     """
     out = []
-    for pth, what in look_entries(card):
+    for n, (pth, what) in enumerate(look_entries(card), 1):
         chunks = hard_break(pth, width - 4)
-        out.append(f"{C['dim']}  → {C['reset']}{link(chunks[0], root, pth)}")
-        out += [f"    {link(ch, root, pth)}" for ch in chunks[1:]]
+        out.append(f"  {sgr(79)}{n}{C['reset']} {C['dim']}→{C['reset']} {link(chunks[0], root, pth)}")
+        out += [f"      {link(ch, root, pth)}" for ch in chunks[1:]]
         if what:
-            out.append(wrap(what, width, "    ", style=C["dim"]))
+            out.append(wrap(what, width, "      ", style=C["dim"]))
     return out
 
 
@@ -1701,6 +1753,7 @@ def run_session(queue: list[tuple], mode: str = "test") -> int:
     dirty: dict[str, dict] = {}
     checked: dict[int, list] = {}
     tabs: dict[int, int] = {}
+    trouble: dict[int, str] = {}
     i = 0
 
     save_prefs(mode=mode)
@@ -1715,14 +1768,17 @@ def run_session(queue: list[tuple], mode: str = "test") -> int:
             def redraw(typing=None):
                 draw_card(queue, i, kind, roots[entry["name"]], cs,
                           mode == "learn" or i in revealed, graded.get(i), mode,
-                          typing, checked.get(i), tabs.get(i, 0), graded)
+                          typing, checked.get(i), tabs.get(i, 0), graded, trouble.get(i))
 
             redraw()
             key = read_key()
 
             if key in ("q", "esc"):
                 break
-            if key == "f":
+            if key == "?":
+                show_keys(mode)
+                read_key()
+            elif key == "f":
                 # Not a grade. "I could not answer this" and "this card is no longer true"
                 # are different facts, and only the second one is worth an update's time.
                 if cs.pop("flagged", None) is None:
@@ -1752,6 +1808,14 @@ def run_session(queue: list[tuple], mode: str = "test") -> int:
                     i += 1
                 else:
                     revealed.add(i)
+            elif key.isdigit() and key != "0":
+                routes = look_entries(card)
+                n = int(key)
+                if n <= len(routes):
+                    if problem := open_ref(routes[n - 1][0], roots[entry["name"]]):
+                        trouble[i] = problem
+                    else:
+                        trouble.pop(i, None)
             elif key == "e":
                 if not edit_card_note(entry["name"], card["id"]):
                     line = read_line("note:", lambda buf: redraw({"label": "note:", "buf": buf}))
@@ -1859,6 +1923,45 @@ def render_why(card: dict, deck: dict, cs: dict, churn: tuple[dict, float], widt
     return out
 
 
+#: (key, what it does, which mode it exists in). The footer carries what is live on the face
+#: in front of you; this is the whole set, one keypress away, so neither has to be a
+#: compromise between being complete and fitting on a line.
+KEYS = [
+    ("←/→", "move between cards", "both"),
+    ("↑/↓", "move between a card's tabs", "both"),
+    ("enter", "flip the card, then move on", "test"),
+    ("y / n", "got it / missed, which moves the box", "test"),
+    ("t", "type your answer: marked for cloze, order and locate,", "test"),
+    ("", "measured against the card's words for prose", "test"),
+    ("1-9", "open that route in $EDITOR, $PAGER or less", "both"),
+    ("f", "flag the card as suspect, and say why", "both"),
+    ("e", "your own note on this card", "both"),
+    ("q", "stop here; everything graded so far is kept", "both"),
+]
+
+GLYPHS = [("⚑", "you flagged this card"), ("✎", "you have written a note on it"),
+          ("⚓", "the anchor: where the fact is defined"),
+          ("●", "graded in this session"), ("○", "still to come"), ("◉", "where you are")]
+
+
+def show_keys(mode: str) -> None:
+    """Every key and every glyph, on its own screen."""
+    cols, _rows = shutil.get_terminal_size((90, 24))
+    width, _left = page_layout(cols)
+    body = [""]
+    for key, what, when in KEYS:
+        if when != "both" and when != mode:
+            continue
+        body.append(f"  {sgr(79)}{key:<7}{C['reset']}{C['dim']}{what}{C['reset']}")
+    body += ["", f"  {C['dim']}{'the marks':<7}{C['reset']}"]
+    body += [f"  {sgr(179)}{g:<7}{C['reset']}{C['dim']}{what}{C['reset']}" for g, what in GLYPHS]
+    body += ["", wrap("The mode is fixed for the session. Quit and start again in the other one, "
+                      "or read an area with `repo-cards brief --topic NAME`.", width, "  ",
+                      style=C["dim"])]
+    draw_page(f"{C['bold']}keys{C['reset']}", f"{C['dim']}{mode} session{C['reset']}", body,
+              f"{C['dim']}any key to go back{C['reset']}")
+
+
 def queue_strip(queue, i: int, graded: dict, width: int) -> str:
     """The whole session in one row: what you got, what you missed, what is left.
 
@@ -1892,19 +1995,20 @@ def key_hint(key: str, label: str, colour: int) -> str:
     return f"{sgr(colour)}{key}{C['reset']} {C['dim']}{label}{C['reset']}"
 
 
-def card_keys(kind: str, cs: dict, revealed: bool, mode: str) -> str:
+def card_keys(kind: str, cs: dict, revealed: bool, mode: str, routes: int = 0) -> str:
     """Only the keys that do something here. The rest live behind `?`."""
     nav = key_hint("←/→", "move", 117)
     flag = key_hint("f", "unflag" if cs.get("flagged") else "flag", 179)
     helps = key_hint("?", "keys", 245)
+    go = key_hint("1" if routes == 1 else f"1-{routes}", "open", 79) if routes else ""
     if mode == "learn":
         parts = [nav, key_hint("↑/↓", "tabs", 109), flag, key_hint("e", "note", 109), helps]
     elif not revealed:
-        parts = [nav, key_hint("enter", "flip", 109), key_hint("t", "type", 79), flag, helps]
+        parts = [nav, key_hint("enter", "flip", 109), key_hint("t", "type", 79), go, flag, helps]
     else:
         parts = [nav, key_hint("↑/↓", "tabs", 109), key_hint("y", "got it", 114),
                  key_hint("n", "missed", 203), key_hint("e", "note", 109), helps]
-    return f" {C['dim']}·{C['reset']} ".join(parts)
+    return f" {C['dim']}·{C['reset']} ".join(p for p in parts if p)
 
 
 def card_state_mark(cs: dict, grade: str | None) -> str:
@@ -1917,7 +2021,7 @@ def card_state_mark(cs: dict, grade: str | None) -> str:
 
 
 def draw_card(queue, i, kind, root, cs, revealed, grade, mode="test", typing=None,
-              checked=None, tab=0, graded=None) -> None:
+              checked=None, tab=0, graded=None, trouble="") -> None:
     entry, card, _state, _deck, _churn = queue[i]
     cols, _rows = shutil.get_terminal_size((90, 24))
     width, _left = page_layout(cols)
@@ -1988,9 +2092,12 @@ def draw_card(queue, i, kind, root, cs, revealed, grade, mode="test", typing=Non
             body += [wrap(str(card.get("q", "")), text_width, "  ", style=C["bold"])]
     if typing and not typing.get("cloze"):
         body += ["", f"  {sgr(179)}{typing['label']}{C['reset']} {typing['buf']}\u2588"]
+    if trouble:
+        body += ["", f"  {sgr(203)}!{C['reset']} {C['dim']}{trouble}{C['reset']}"]
 
     draw_page(head, head_right, body,
-              card_keys(kind, cs, revealed, mode), card_state_mark(cs, grade),
+              card_keys(kind, cs, revealed, mode, min(9, len(look_entries(card)))),
+              card_state_mark(cs, grade),
               strip=queue_strip(queue, i, graded or {}, text_width) if len(queue) > 1 else "")
 
 
