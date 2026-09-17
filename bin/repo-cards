@@ -1707,6 +1707,14 @@ def run_session(queue: list[tuple], mode: str = "test") -> int:
     return finish_session(queue, graded, dirty)
 
 
+def one_line(text: str, width: int) -> str:
+    """Prose flattened to a single line, cut with an ellipsis rather than mid-word."""
+    flat = " ".join(str(text).split())
+    if len(flat) <= width:
+        return flat
+    return flat[: max(0, width - 1)].rstrip() + "…"
+
+
 def key_hint(key: str, label: str, colour: int) -> str:
     return f"{sgr(colour)}{key}{C['reset']} {C['dim']}{label}{C['reset']}"
 
@@ -1719,7 +1727,7 @@ def card_keys(kind: str, cs: dict, revealed: bool, mode: str) -> str:
     if mode == "learn":
         parts = [nav, key_hint("l", "test", 214), flag, key_hint("e", "note", 109), helps]
     elif not revealed:
-        parts = [nav, key_hint("enter", "reveal", 109), key_hint("t", "type", 79), flag, helps]
+        parts = [nav, key_hint("enter", "flip", 109), key_hint("t", "type", 79), flag, helps]
     else:
         parts = [nav, key_hint("y", "got it", 114), key_hint("n", "missed", 203),
                  key_hint("e", "note", 109), helps]
@@ -1755,14 +1763,20 @@ def draw_card(queue, i, kind, root, cs, revealed, grade, mode="test", typing=Non
                   f"{sgr(BOX_COLOUR[cs['box']])}box {cs['box']}{C['reset']}  "
                   f"{sgr(PRIORITY_COLOUR[pri])}{'★' * (4 - pri)}{C['reset']}")
 
+    # The two faces. A card is a card: the question and its answer are never on screen
+    # together, which is what buys the room. Measured against the real decks, showing both
+    # needs 23 rows in a 21-row budget, and the routes alone are six of them.
     body: list[str] = []
-    if topics:
-        body.append("  " + "  ".join(
-            f"{topic_colour(t, siblings)}▌{t}{C['reset']}" for t in topics[:3]))
-        body.append("")
-    body += render_prompt(card, kind, text_width, root)
-    if revealed:
-        body += ["", DIVIDER, ""]
+    if not revealed:
+        if topics:
+            body.append("  " + "  ".join(
+                f"{topic_colour(t, siblings)}▌{t}{C['reset']}" for t in topics[:3]))
+            body.append("")
+        body += render_prompt(card, kind, text_width, root)
+    else:
+        # One dim line of what was asked. You grade yourself against the question, so it
+        # cannot leave the screen, but it has done its work and the answer needs the space.
+        body += [f"  {C['dim']}{one_line(card.get('q', ''), text_width - 2)}{C['reset']}", ""]
         if checked and checked.get("parts") is not None:
             body += render_check(checked["parts"], text_width)
             body += [f"  {C['dim']}marked from what you typed · y or n overrides{C['reset']}", ""]
