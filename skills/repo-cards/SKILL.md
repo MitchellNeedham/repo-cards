@@ -28,6 +28,8 @@ repo-cards drift --repo NAME    # what changed since the deck was generated
 repo-cards catchup --repo NAME  # what moved since you last reviewed it. Read-only
 repo-cards check --repo NAME    # validate a deck. Exit 1 if anything is broken
 repo-cards adopt --repo NAME old=new    # give a renamed card the old id's review history
+repo-cards export --repo NAME   # write the deck out, to share or to commit
+repo-cards import PATH          # install a deck somebody else wrote
 repo-cards stats                # due counts, box distribution, stickiest cards
 repo-cards flags                # cards flagged as suspect during review
 repo-cards flags --clear        # clear them, once an update has dealt with them
@@ -49,6 +51,14 @@ the layout is:
     state.json             Leitner state, keyed by card id. NEVER edit or regenerate this
     notes/                 long-form notes for this repo, if any
 ```
+
+A deck is content and nothing else: no paths, no schedule, no machine. `repo-cards export` writes
+one out (a directory carries `notes/` with it) and `repo-cards import` installs it, keeping whatever
+review history this machine already had for the ids that survive. That is how a deck reaches a
+teammate or gets committed to the repo it describes. The importing machine must have the repo
+registered, and cross-repo refs need the other repos registered under the same names, which
+`export` warns about. Suggest it when somebody asks how to share a deck or onboard somebody with
+one, not otherwise.
 
 `<data home>` is platform-native: `~/.local/share/repo-cards` on Linux,
 `~/Library/Application Support/repo-cards` on macOS, `%LOCALAPPDATA%\repo-cards` on Windows.

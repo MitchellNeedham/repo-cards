@@ -19,6 +19,8 @@ Content and scheduling state are separate files: regenerating a deck never costs
   repo-cards catchup               what moved since you last reviewed
   repo-cards check                 validate a deck against the rules it is written to
   repo-cards adopt OLD=NEW         give a renamed card the history of the old id
+  repo-cards export --repo N       write a deck out, to share or to commit
+  repo-cards import PATH           install a deck somebody else wrote
   repo-cards register PATH         add a repo
   repo-cards home                  print where everything lives
 """
@@ -2429,6 +2431,117 @@ def cmd_flags(args) -> int:
     return 0
 
 
+# --- export and import -------------------------------------------------------
+#
+# A deck is content and nothing else: no paths, no schedule, no machine. The only thing
+# keeping it on one laptop was that nothing wrote it anywhere else. Handing one over is the
+# difference between a personal habit and the thing a team gives somebody on their first
+# day, and it costs nothing, because the split that makes regeneration safe makes the
+# content portable for the same reason.
+
+def cmd_export(args) -> int:
+    """Write a deck out, verbatim. Stdout by default, so it pipes."""
+    if not args.repo:
+        print(f"{C['red']}usage: repo-cards export --repo NAME [--out PATH]{C['reset']}")
+        return 1
+    src = deck_path(args.repo)
+    if not src.exists():
+        print(f"{C['red']}no deck for {args.repo} at {src}{C['reset']}")
+        return 1
+    # The file rather than a re-dump of the parsed deck: the section comments and the field
+    # order are how a deck is read by a person, and yaml.dump would throw both away.
+    text = src.read_text()
+    notes = deck_dir(args.repo) / "notes"
+    has_notes = notes.is_dir() and any(notes.iterdir())
+
+    if not args.out:
+        sys.stdout.write(text)
+        if has_notes:
+            print(f"{C['dim']}# this deck has notes/; use --out DIR to carry them too{C['reset']}",
+                  file=sys.stderr)
+        return 0
+
+    out = Path(args.out).expanduser()
+    if out.suffix in (".yaml", ".yml"):
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(text)
+        carried = 0
+    else:
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "deck.yaml").write_text(text)
+        carried = 0
+        if has_notes:
+            shutil.copytree(notes, out / "notes", dirs_exist_ok=True)
+            carried = sum(1 for _ in (out / "notes").rglob("*") if _.is_file())
+    print(f"{C['green']}exported {args.repo}{C['reset']} -> {out}"
+          + (f"  {C['dim']}({carried} note file(s)){C['reset']}" if carried else ""))
+
+    deck = yaml.safe_load(text) or {}
+    foreign = sorted({split_ref(r)[0] for c in (deck.get("cards") or []) for r in all_refs(c)
+                      if split_ref(r)[0] and split_ref(r)[0] != args.repo})
+    if foreign:
+        print(f"{C['yellow']}! cards point into {', '.join(foreign)}{C['reset']} {C['dim']}"
+              f"— whoever imports this needs those registered under the same names.{C['reset']}")
+    return 0
+
+
+def cmd_import(args) -> int:
+    """Install a deck somebody else wrote, without touching this machine's review history."""
+    if not args.path:
+        print(f"{C['red']}usage: repo-cards import PATH [--name NAME] [--force]{C['reset']}")
+        return 1
+    src = Path(args.path).expanduser()
+    if src.is_dir():
+        src = src / "deck.yaml"
+    if not src.exists():
+        print(f"{C['red']}no deck at {src}{C['reset']}")
+        return 1
+    try:
+        deck = yaml.safe_load(src.read_text()) or {}
+    except yaml.YAMLError as err:
+        print(f"{C['red']}does not parse: {err}{C['reset']}")
+        return 1
+
+    name = args.name or str(deck.get("repo") or "") or src.parent.name
+    entry = next((e for e in load_registry() if e["name"] == name), None)
+    if entry is None:
+        print(f"{C['red']}{name} is not registered on this machine{C['reset']}")
+        print(f"{C['dim']}A deck needs a working tree to measure drift against. Register it first:"
+              f"\n  repo-cards register /path/to/{name}{C['reset']}")
+        return 1
+
+    target = deck_path(name)
+    if target.exists() and not args.force:
+        print(f"{C['red']}{name} already has a deck at {target}{C['reset']}")
+        print(f"{C['dim']}--force replaces it. Review progress survives either way: it is keyed "
+              f"by card id in a different file.{C['reset']}")
+        return 1
+
+    cards = deck.get("cards") or []
+    state = load_state(name)
+    ids = {str(c.get("id") or "") for c in cards}
+    kept = sorted(ids & set(state))
+    orphaned = sorted(set(state) - ids)
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(src.read_text())
+    notes = src.parent / "notes"
+    if notes.is_dir():
+        shutil.copytree(notes, deck_dir(name) / "notes", dirs_exist_ok=True)
+
+    print(f"{C['green']}imported {len(cards)} card(s) as {name}{C['reset']} -> {target}")
+    if kept:
+        print(f"  {len(kept)} card(s) matched review history you already had, and keep their box")
+    if orphaned:
+        print(f"  {C['yellow']}{len(orphaned)} state entr(ies) no longer match a card{C['reset']}"
+              f"  {C['dim']}repo-cards check --repo {name}{C['reset']}")
+    problems = [x for x in check_deck(entry, deck, cards) if x[0] == "error"]
+    if problems:
+        print(f"  {C['yellow']}{len(problems)} error(s) against this checkout{C['reset']}"
+              f"  {C['dim']}repo-cards check --repo {name}{C['reset']}")
+    return 0
+
+
 # --- registry management -----------------------------------------------------
 
 def cmd_register(args) -> int:
@@ -2497,11 +2610,11 @@ def main() -> int:
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("command", nargs="?", default="review",
                    choices=["review", "test", "learn", "brief", "topics", "stats", "list",
-                            "drift", "flags", "catchup", "check", "adopt", "register",
-                            "forget", "repos", "home"])
+                            "drift", "flags", "catchup", "check", "adopt", "export",
+                            "import", "register", "forget", "repos", "home"])
     p.add_argument("path", nargs="?",
                    help="for `register`: repo root. for `forget`: the name. for `flags`: a card id. "
-                        "for `adopt`: old-id=new-id pairs")
+                        "for `adopt`: old-id=new-id pairs. for `import`: the deck to read")
     p.add_argument("--name", help="for `register`: deck name (default: directory name)")
     p.add_argument("--repo", help="limit to one registered repo")
     p.add_argument("--tag", help="limit to these tags (one name, or a comma-separated list)")
@@ -2517,6 +2630,8 @@ def main() -> int:
     p.add_argument("--full", action="store_true", help="for `drift`: full detail for every repo, not a summary")
     p.add_argument("--clear", action="store_true", help="for `flags`: clear them, once an update has dealt with them")
     p.add_argument("--since", help="for `catchup`: look back to this date instead of your last review")
+    p.add_argument("--out", help="for `export`: write here (a .yaml file, or a directory that also takes notes/)")
+    p.add_argument("--force", action="store_true", help="for `import`: replace an existing deck")
     p.add_argument("--strict", action="store_true", help="for `check`: fail on warnings as well as errors")
     p.add_argument("--errors-only", action="store_true", help="for `check`: print errors, not warnings")
     p.add_argument("--priority", type=int, choices=[1, 2, 3],
@@ -2530,6 +2645,7 @@ def main() -> int:
         "review": cmd_review, "brief": cmd_brief, "topics": cmd_topics,
         "stats": cmd_stats, "list": cmd_list, "drift": cmd_drift, "flags": cmd_flags,
         "catchup": cmd_catchup, "check": cmd_check, "adopt": cmd_adopt,
+        "export": cmd_export, "import": cmd_import,
         "register": cmd_register, "forget": cmd_forget, "repos": cmd_repos, "home": cmd_home,
     }[args.command](args)
 

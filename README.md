@@ -176,6 +176,7 @@ $ repo-cards drift
 | `topics` `stats` `list` `drift` | what exists, deck health, every card, what changed |
 | `check` `--strict` | validate a deck against the rules it is written to |
 | `adopt OLD=NEW` | give a renamed card the old id's review history |
+| `export --repo N` `import PATH` | hand a deck to somebody else, keeping your own progress |
 | `catchup` `--since D` | what moved since you last reviewed, read-only |
 | `flags` `flags --clear` | cards you marked suspect during review, and clearing them |
 | `register PATH` `forget NAME` `repos` `home` | the registry, and where things live |
@@ -196,6 +197,11 @@ everywhere, and `repo-cards home` prints what it resolved.
     state.json        Leitner state, keyed by card id
     notes/            long-form notes, which topics can point at
 ```
+
+Portable is meant literally. `repo-cards export --repo billing --out ./billing-deck` writes the
+cards and their notes somewhere you can commit or send, and `repo-cards import ./billing-deck`
+installs them on the other machine. Review history stays where it is: the ids that match keep their
+boxes, so importing a colleague's deck costs you nothing you had learned.
 
 ## Why it works this way
 
