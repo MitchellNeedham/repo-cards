@@ -178,6 +178,11 @@ A plain recall card carrying two or more routes is also asked as `locate` about 
 the variety costs no extra authoring. Reach for an explicit `kind:` when the shape genuinely fits:
 `cloze` for a rule with two or three load-bearing words in it, `order` for a pipeline or lifecycle.
 
+**`t` works on any card**, but only these three are *marked*. On a prose answer it shows how much
+of the card's content your words covered and grades nothing, because no string comparison can tell
+a right answer in your own words from a wrong one in the card's. Say so if somebody reads the
+percentage as a score.
+
 **These three can be typed and marked**, with `t` during a test session, and the mark moves the box
 like any other grade. That is worth knowing while writing them, because it is what the blanks are
 for: choose `{{load-bearing}}` words that are wrong to get wrong, not adjectives. A typo passes and

@@ -963,6 +963,43 @@ def close_enough(typed: str, expected: str) -> bool:
     return a == b or difflib.SequenceMatcher(None, a, b).ratio() >= CLOSE_ENOUGH
 
 
+#: Words that carry no content, so counting them would flatter every answer equally.
+STOPWORDS = frozenset(
+    "the a an and or but is are was were be been being it its this that these those to of in on "
+    "at for from with by as not no if then than so which what when where who whom how why can "
+    "could should would will shall may might must do does did done have has had you your we our "
+    "they their there here into over under about".split())
+
+
+def stem(word: str) -> str:
+    """A crude suffix strip, so `versions` meets `versioned`.
+
+    Not linguistics, and it does not need to be: this feeds a hint, and the alternative is a
+    reader who wrote the right answer being told they matched none of it.
+    """
+    for suffix in ("ing", "ed", "es", "s"):
+        if len(word) > 4 and word.endswith(suffix):
+            return word[: -len(suffix)]
+    return word
+
+
+def content_words(text: str) -> set[str]:
+    return {stem(w) for w in normalise(text).split() if len(w) > 2 and w not in STOPWORDS}
+
+
+def word_overlap(typed: str, expected: str) -> float:
+    """How much of the answer's content the reader produced. A hint, never a grade.
+
+    Recall rather than precision: saying more than the card does is not wrong, and saying
+    none of it is the thing worth noticing. It cannot tell a paraphrase from a miss, which
+    is exactly why nothing is decided by it.
+    """
+    wanted = content_words(expected)
+    if not wanted:
+        return 0.0
+    return len(content_words(typed) & wanted) / len(wanted)
+
+
 _SHUFFLE: dict[str, list[str]] = {}
 
 
@@ -1049,7 +1086,9 @@ def ask_for(card: dict, kind: str) -> list[str]:
         return [f"{n}?" for n in range(1, len(CLOZE.findall(str(card.get("a", "")))) + 1)]
     if kind == "order":
         return ["order? (numbers, e.g. 3 1 2 4)"]
-    return ["where? (paths, separated by spaces)"]
+    if kind == "locate":
+        return ["where? (paths, separated by spaces)"]
+    return ["answer?"]
 
 
 def check_answer(card: dict, kind: str, typed: list[str]) -> tuple[bool, list[tuple[bool, str, str]]]:
@@ -1094,6 +1133,19 @@ def render_check(parts: list[tuple[bool, str, str]], width: int) -> list[str]:
         if not ok and said:
             out.append(wrap(f"you said: {said}", width, "      ", style=C["dim"]))
     return out
+
+
+def render_overlap(typed: str, share: float, width: int) -> list[str]:
+    """What the reader wrote, and how much of the answer it covered."""
+    pct = round(100 * share)
+    colour = sgr(114) if pct >= 60 else sgr(179) if pct >= 30 else sgr(203)
+    return [
+        wrap(f"you said: {typed}", width, "    ", style=C["dim"]),
+        "",
+        f"  {colour}~{pct}% of the answer's words{C['reset']}",
+        wrap("A hint, not a grade: it cannot tell your words from the card's. You say whether "
+             "you knew it.", width, "  ", style=C["dim"]),
+    ]
 
 
 def render_answer(card: dict, kind: str, width: int, root: Path) -> list[str]:
@@ -1501,16 +1553,21 @@ def run_session(queue: list[tuple], mode: str = "test") -> int:
                     i += 1
                 else:
                     revealed.add(i)
-            elif key == "t" and mode == "test" and i not in revealed and kind in CHECKABLE:
-                # Typed and marked, rather than recalled and self-marked. Only for the kinds
-                # where the answer is short and exact, so the mark is a fact rather than an
-                # opinion, and it is a grade like any other: y or n puts it right.
+            elif key == "t" and mode == "test" and i not in revealed:
                 typed = [read_line(label, lambda buf, lbl=label: redraw((lbl, buf)))
                          for label in ask_for(card, kind)]
-                ok, parts = check_answer(card, kind, typed)
-                checked[i] = parts
                 revealed.add(i)
-                graded[i] = "y" if ok else "n"
+                if kind in CHECKABLE:
+                    # Short and exact, so the mark is a fact rather than an opinion, and it
+                    # is a grade like any other: y or n puts it right.
+                    ok, parts = check_answer(card, kind, typed)
+                    checked[i] = {"parts": parts}
+                    graded[i] = "y" if ok else "n"
+                else:
+                    # Prose. Measured and shown, never graded: no string comparison can tell
+                    # a right answer in your own words from a wrong one in the card's.
+                    said = " ".join(typed)
+                    checked[i] = {"typed": said, "overlap": word_overlap(said, str(card.get("a", "")))}
             elif key in ("y", "n") and mode == "test":
                 revealed.add(i)
                 graded[i] = key
@@ -1555,11 +1612,13 @@ def draw_card(queue, i, kind, root, cs, revealed, grade, mode="test", typing=Non
     body += render_prompt(card, kind, inner - 2, root) + [""]
     if revealed:
         body += [DIVIDER, ""]
-        if checked:
+        if checked and checked.get("parts") is not None:
             # In the body rather than the footer: the footer is already carrying the keys and
             # the grade, and this is the sentence that says the grade is not final.
-            body += render_check(checked, inner - 2)
+            body += render_check(checked["parts"], inner - 2)
             body += [f"  {C['dim']}marked from what you typed · y or n overrides{C['reset']}", ""]
+        elif checked:
+            body += render_overlap(checked["typed"], checked["overlap"], inner - 2) + [""]
         body += render_answer(card, kind, inner - 2, root) + [""]
         anchor = str(card.get("anchor", "-"))
         body += [f"  {C['dim']}anchor{C['reset']}  {link(anchor, root, anchor)}", ""]
@@ -1581,10 +1640,8 @@ def draw_card(queue, i, kind, root, cs, revealed, grade, mode="test", typing=Non
     if mode == "learn":
         parts = [nav, hint("l", "test", 214), flag, quit_]
     elif not revealed:
-        parts = [nav, hint("enter", "reveal", 109)]
-        if kind in CHECKABLE:
-            parts.append(hint("t", "type it", 79))
-        parts += [hint("l", "learn", 214), flag, quit_]
+        parts = [nav, hint("enter", "reveal", 109), hint("t", "type it", 79),
+                 hint("l", "learn", 214), flag, quit_]
     else:
         parts = [nav, hint("y", "got it", 114), hint("n", "missed", 203),
                  hint("l", "learn", 214), flag, quit_]

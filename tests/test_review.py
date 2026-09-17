@@ -150,3 +150,36 @@ class TestTypedGrading:
         state = session([card("a", anchor="src/mod.py#alpha", **self.CLOZE)],
                         ["t", "q"], lines=["authoritative"], mode="learn")
         assert state == {}
+
+
+class TestOverlapHint:
+    """Prose is measured, never marked."""
+
+    ANSWER = "The ledger is authoritative; the projection is written in the same transaction."
+
+    def test_the_same_words_score_full(self, rc):
+        assert rc.word_overlap(self.ANSWER, self.ANSWER) == 1.0
+
+    def test_nothing_in_common_scores_zero(self, rc):
+        assert rc.word_overlap("no idea at all", self.ANSWER) == 0.0
+
+    def test_a_crude_stem_lets_versions_meet_versioned(self, rc):
+        assert rc.word_overlap("versions", "the handshake is versioned") > 0
+
+    def test_filler_words_do_not_flatter_an_answer(self, rc):
+        assert rc.word_overlap("it is the and of in on at for", self.ANSWER) == 0.0
+
+    def test_saying_more_than_the_card_is_not_punished(self, rc):
+        """Recall, not precision: the question is how much of the answer you produced."""
+        assert rc.word_overlap(self.ANSWER + " and it is checked by a test", self.ANSWER) == 1.0
+
+    def test_a_typed_prose_answer_reveals_but_does_not_grade(self, rc, session, card):
+        state = session([card("a", anchor="src/mod.py#alpha", a=self.ANSWER)],
+                        ["t", "q"], lines=["something about ledgers"])
+        assert state == {}
+
+    def test_you_still_grade_it_yourself(self, rc, session, card):
+        state = session([card("a", anchor="src/mod.py#alpha", a=self.ANSWER)],
+                        ["t", "y", "q"], lines=["the ledger is authoritative"],
+                        state={"a": {"box": 1, "due": "2026-01-01", "seen": 2, "lapses": 0}})
+        assert state["a"]["box"] == 2

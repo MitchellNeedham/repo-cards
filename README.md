@@ -151,9 +151,14 @@ card with good routes is asked that way about one time in six.
 ```
 
 A typo passes, a different word does not, and the mark moves the box like any other grade.
-Prose answers are never marked this way: on a card whose answer is a *why*, "blank to save space"
-and "blank because it is a prompt, not a snapshot" look alike to any string comparison, and one of
-them is the defect the card exists to prevent.
+
+On a **prose** card `t` measures instead of marking: it shows how much of the answer's content your
+words covered, and you still grade yourself. That line is drawn on purpose. On a card whose answer
+is a *why*, "blank to save space" and "blank because it is a prompt, not a snapshot" look alike to
+any string comparison, and one of them is the defect the card exists to prevent. `rapidfuzz` would
+match better and `model2vec` would match meaning in thirty megabytes without an LLM; neither is
+reached for, because the accuracy they buy is not the accuracy this needs, and both cost the
+instant offline start that gets the tool run each morning.
 
 **Topics** are curated reading orders, plus `last-week` and `last-month`, which are built from git
 history: the cards whose anchor a commit touched in that window, newest first. Those two need no
