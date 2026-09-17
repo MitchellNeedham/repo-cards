@@ -302,3 +302,48 @@ class TestQueueStrip:
 
     def test_the_start_of_a_long_queue_has_no_left_edge_mark(self, rc):
         assert "‹" not in rc.queue_strip(self.rows(rc, 200), 0, {}, 40)
+
+
+class TestDiffAndInPlaceCloze:
+    """What the reader typed, shown against what was wanted."""
+
+    ANSWER = "It makes the message a prompt, not a snapshot."
+
+    def plain(self, rc, lines):
+        return rc._INVISIBLE.sub("", "\n".join(lines))
+
+    def test_the_words_you_missed_are_named(self, rc):
+        out = self.plain(rc, rc.render_overlap("the row says it changed", self.ANSWER, 70))
+        assert "you did not say:" in out
+        assert "prompt" in out.split("you did not say:")[1]
+        assert "snapshot" in out.split("you did not say:")[1]
+
+    def test_words_you_did_say_are_not_named(self, rc):
+        out = self.plain(rc, rc.render_overlap("a prompt, not a snapshot", self.ANSWER, 70))
+        missed = out.split("you did not say:")[1]
+        assert "prompt" not in missed and "snapshot" not in missed
+
+    def test_saying_all_of_it_names_nothing(self, rc):
+        out = self.plain(rc, rc.render_overlap(self.ANSWER, self.ANSWER, 70))
+        assert "you did not say:" not in out
+        assert "~100%" in out
+
+    def test_the_answer_comes_with_the_diff(self, rc):
+        """It stands in for the plain answer rather than sitting above a second copy."""
+        out = self.plain(rc, rc.render_overlap("nothing", self.ANSWER, 70))
+        assert "It makes the message a prompt" in out.replace("\n", " ")
+
+    def test_a_filled_blank_shows_what_you_typed(self, rc):
+        card = {"id": "c", "a": "The ledger is {{authoritative}}; written {{in one transaction}}."}
+        out = rc._INVISIBLE.sub("", rc.cloze_sentence(card, ["authoritative"], 1, "in one"))
+        assert "The ledger is authoritative;" in out
+
+    def test_the_blank_you_are_on_carries_the_cursor(self, rc):
+        card = {"id": "c", "a": "The ledger is {{authoritative}}; written {{in one transaction}}."}
+        out = rc._INVISIBLE.sub("", rc.cloze_sentence(card, ["authoritative"], 1, "in one"))
+        assert "written in one█." in out
+
+    def test_blanks_you_have_not_reached_stay_blank(self, rc):
+        card = {"id": "c", "a": "The ledger is {{authoritative}}; written {{in one transaction}}."}
+        out = rc._INVISIBLE.sub("", rc.cloze_sentence(card, [], 0, "auth"))
+        assert "▁" in out.split(";")[1]

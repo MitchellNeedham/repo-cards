@@ -1277,17 +1277,66 @@ def render_check(parts: list[tuple[bool, str, str]], width: int) -> list[str]:
     return out
 
 
-def render_overlap(typed: str, share: float, width: int) -> list[str]:
-    """What the reader wrote, and how much of the answer it covered."""
+WORD = re.compile(r"[A-Za-z0-9'’-]+")
+
+
+def render_overlap(typed: str, expected: str, width: int) -> list[str]:
+    """What the reader wrote, against the answer, with what they did not say marked.
+
+    A percentage on its own tells you nothing you can do anything about. The words you did
+    not produce are the whole of the useful content: on this deck they are almost always the
+    load-bearing ones, because that is what the answers are made of.
+    """
+    said = content_words(typed)
+    wanted = content_words(expected)
+    missed = [w for w in WORD.findall(expected)
+              if (k := stem(normalise(w))) in wanted and k not in said]
+
+    def mark(m):
+        word = m.group(0)
+        key = stem(normalise(word))
+        if key in wanted and key not in said:
+            return f"{sgr(179)}{C['bold']}{word}{C['reset']}{C['cyan']}"
+        return word
+
+    share = len(said & wanted) / len(wanted) if wanted else 0.0
     pct = round(100 * share)
     colour = sgr(114) if pct >= 60 else sgr(179) if pct >= 30 else sgr(203)
-    return [
-        wrap(f"you said: {typed}", width, "    ", style=C["dim"]),
-        "",
-        f"  {colour}~{pct}% of the answer's words{C['reset']}",
-        wrap("A hint, not a grade: it cannot tell your words from the card's. You say whether "
-             "you knew it.", width, "  ", style=C["dim"]),
-    ]
+    out = [f"  {C['dim']}you said{C['reset']}",
+           wrap(typed or "(nothing)", width, "  ", style=C["dim"]), "",
+           f"  {C['dim']}the card says{C['reset']}",
+           wrap(WORD.sub(mark, str(expected)), width, "  ", style=C["cyan"]), "",
+           f"  {colour}~{pct}% of its content words{C['reset']}"]
+    if missed:
+        seen, unique = set(), []
+        for w in missed:
+            if w.lower() not in seen:
+                seen.add(w.lower())
+                unique.append(w)
+        out.append(wrap("you did not say: " + ", ".join(unique[:8]), width, "  ", style=C["dim"]))
+    out.append(wrap("A hint, not a grade: it cannot tell your words from the card's. You say "
+                    "whether you knew it.", width, "  ", style=C["dim"]))
+    return out
+
+
+def cloze_sentence(card: dict, filled: list[str], active: int, buf: str) -> str:
+    """The answer with its blanks: filled ones as typed, the live one carrying the cursor.
+
+    Typed where the blank actually sits, rather than into a prompt underneath, because the
+    sentence around it is most of what tells you which word belongs there.
+    """
+    n = -1
+
+    def fill(m):
+        nonlocal n
+        n += 1
+        if n < len(filled):
+            return f"{sgr(114)}{filled[n]}{C['reset']}{C['cyan']}"
+        if n == active:
+            return f"{sgr(179)}{buf}█{C['reset']}{C['cyan']}"
+        return "▁" * max(6, min(len(m.group(1)), 18))
+
+    return CLOZE.sub(fill, str(card.get("a", "")))
 
 
 def render_answer(card: dict, kind: str, width: int, root: Path) -> list[str]:
@@ -1674,7 +1723,7 @@ def run_session(queue: list[tuple], mode: str = "test") -> int:
                     cs["flagged"] = today().isoformat()
                     # Raised first, asked about second: an abandoned prompt must not lose the
                     # flag, which is the part that matters.
-                    note = read_line("why?", lambda buf: redraw(("why?", buf)))
+                    note = read_line("why?", lambda buf: redraw({"label": "why?", "buf": buf}))
                     if note:
                         cs["flag_note"] = note
                 else:
@@ -1702,12 +1751,22 @@ def run_session(queue: list[tuple], mode: str = "test") -> int:
                     revealed.add(i)
             elif key == "e":
                 if not edit_card_note(entry["name"], card["id"]):
-                    line = read_line("note:", lambda buf: redraw(("note:", buf)))
+                    line = read_line("note:", lambda buf: redraw({"label": "note:", "buf": buf}))
                     if line:
                         append_card_note(entry["name"], card["id"], line)
             elif key == "t" and mode == "test" and i not in revealed:
-                typed = [read_line(label, lambda buf, lbl=label: redraw((lbl, buf)))
-                         for label in ask_for(card, kind)]
+                if kind == "cloze":
+                    # Filled in place, one blank at a time, with the sentence around it: the
+                    # words either side are most of what tells you which word belongs there.
+                    typed = []
+                    for n in range(len(CLOZE.findall(str(card.get("a", ""))))):
+                        typed.append(read_line(
+                            f"blank {n + 1}",
+                            lambda buf, n=n, done=list(typed): redraw({"cloze": (done, n, buf)})))
+                else:
+                    typed = [read_line(label, lambda buf, lbl=label:
+                                       redraw({"label": lbl, "buf": buf}))
+                             for label in ask_for(card, kind)]
                 revealed.add(i)
                 if kind in CHECKABLE:
                     # Short and exact, so the mark is a fact rather than an opinion, and it
@@ -1719,7 +1778,7 @@ def run_session(queue: list[tuple], mode: str = "test") -> int:
                     # Prose. Measured and shown, never graded: no string comparison can tell
                     # a right answer in your own words from a wrong one in the card's.
                     said = " ".join(typed)
-                    checked[i] = {"typed": said, "overlap": word_overlap(said, str(card.get("a", "")))}
+                    checked[i] = {"typed": said}
             elif key in ("y", "n") and mode == "test":
                 revealed.add(i)
                 graded[i] = key
@@ -1883,7 +1942,16 @@ def draw_card(queue, i, kind, root, cs, revealed, grade, mode="test", typing=Non
             body.append("  " + "  ".join(
                 f"{topic_colour(t, siblings)}▌{t}{C['reset']}" for t in topics[:3]))
             body.append("")
-        body += render_prompt(card, kind, text_width, root)
+        if typing and typing.get("cloze"):
+            filled, active, buf = typing["cloze"]
+            blanks = len(CLOZE.findall(str(card.get("a", ""))))
+            body += [wrap(card["q"], text_width, "  ", style=C["bold"]), "",
+                     wrap(cloze_sentence(card, filled, active, buf), text_width, "  ",
+                          style=C["cyan"]), "",
+                     f"  {C['dim']}blank {active + 1} of {blanks} · enter to fill it · "
+                     f"esc to give up{C['reset']}"]
+        else:
+            body += render_prompt(card, kind, text_width, root)
     else:
         # One dim line of what was asked. You grade yourself against the question, so it
         # cannot leave the screen, but it has done its work and the answer needs the space.
@@ -1892,14 +1960,18 @@ def draw_card(queue, i, kind, root, cs, revealed, grade, mode="test", typing=Non
         body += [f"  {C['dim']}{one_line(card.get('q', ''), text_width - 2)}{C['reset']}", "",
                  render_tab_row(tabs, tab % len(tabs), text_width), ""]
 
+        anchor = str(card.get("anchor", "-"))
         if active == "answer":
             if checked and checked.get("parts") is not None:
                 body += render_check(checked["parts"], text_width)
                 body += [f"  {C['dim']}marked from what you typed · y or n overrides{C['reset']}", ""]
+                body += render_answer(card, kind, text_width, root) + [""]
             elif checked:
-                body += render_overlap(checked["typed"], checked["overlap"], text_width) + [""]
-            body += render_answer(card, kind, text_width, root) + [""]
-            anchor = str(card.get("anchor", "-"))
+                # The diff carries the answer with it, so it stands in for render_answer
+                # rather than sitting above a second copy of the same words.
+                body += render_overlap(checked["typed"], str(card.get("a", "")), text_width) + [""]
+            else:
+                body += render_answer(card, kind, text_width, root) + [""]
             body += [f"  {C['dim']}⚓{C['reset']}  {link(anchor, root, anchor)}"]
         elif active == "routes":
             body += route_lines(card, root, text_width)
@@ -1911,9 +1983,8 @@ def draw_card(queue, i, kind, root, cs, revealed, grade, mode="test", typing=Non
             body += render_why(card, _deck, cs, _churn, text_width)
         else:
             body += [wrap(str(card.get("q", "")), text_width, "  ", style=C["bold"])]
-    if typing is not None:
-        label, buf = typing
-        body += ["", f"  {sgr(179)}{label}{C['reset']} {buf}\u2588"]
+    if typing and not typing.get("cloze"):
+        body += ["", f"  {sgr(179)}{typing['label']}{C['reset']} {typing['buf']}\u2588"]
 
     draw_page(head, head_right, body,
               card_keys(kind, cs, revealed, mode), card_state_mark(cs, grade),
