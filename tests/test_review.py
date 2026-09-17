@@ -183,3 +183,42 @@ class TestOverlapHint:
                         ["t", "y", "q"], lines=["the ledger is authoritative"],
                         state={"a": {"box": 1, "due": "2026-01-01", "seen": 2, "lapses": 0}})
         assert state["a"]["box"] == 2
+
+
+class TestCardNotes:
+    """Your own note on a card: what it cost you, kept apart from what the repo decided."""
+
+    def test_e_writes_a_note(self, rc, session, card):
+        session([card("a", anchor="src/mod.py#alpha")], ["e", "q"],
+                lines=["bit me on the backfill in August"])
+        assert rc.read_card_note("repo", "a") == "bit me on the backfill in August"
+
+    def test_notes_accumulate_rather_than_replace(self, rc, session, card):
+        session([card("a", anchor="src/mod.py#alpha")], ["e", "e", "q"],
+                lines=["first thing", "second thing"])
+        assert rc.read_card_note("repo", "a").split("\n") == ["first thing", "second thing"]
+
+    def test_an_abandoned_note_writes_nothing(self, rc, session, card):
+        session([card("a", anchor="src/mod.py#alpha")], ["e", "q"], lines=[""])
+        assert not rc.card_note_path("repo", "a").exists()
+
+    def test_a_note_lives_under_notes_so_export_carries_it(self, rc):
+        assert rc.card_note_path("repo", "a").is_relative_to(rc.deck_dir("repo") / "notes")
+
+    def test_a_note_is_not_state_and_survives_a_rewritten_deck(self, rc, session, card):
+        """It is deliberately not on the card: an update rewrites cards and must not touch this."""
+        session([card("a", anchor="src/mod.py#alpha")], ["e", "q"], lines=["mine"])
+        rc.deck_path("repo").write_text('{"repo": "repo", "cards": []}')
+        assert rc.read_card_note("repo", "a") == "mine"
+
+    def test_adopt_carries_the_note_to_the_new_id(self, rc, repo, deck_factory, card):
+        import argparse
+        repo.write("src/mod.py", "def alpha():\n    return 1\n")
+        repo.commit("init")
+        deck_factory(repo, [card("alpha-is-always-one", anchor="src/mod.py#alpha")])
+        rc.save_state("repo", {"alpha-is-one": {"box": 3, "due": "2026-10-01", "seen": 2, "lapses": 0}})
+        rc.append_card_note("repo", "alpha-is-one", "cost me an afternoon")
+
+        rc.cmd_adopt(argparse.Namespace(repo="repo", path="alpha-is-one=alpha-is-always-one"))
+        assert rc.read_card_note("repo", "alpha-is-always-one") == "cost me an afternoon"
+        assert not rc.card_note_path("repo", "alpha-is-one").exists()

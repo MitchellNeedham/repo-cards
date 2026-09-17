@@ -36,6 +36,7 @@ import json
 import os
 import random
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -173,6 +174,59 @@ def save_prefs(**changes) -> None:
 
 def state_file(name: str) -> Path:
     return deck_dir(name) / "state.json"
+
+
+# --- your own notes on a card ------------------------------------------------
+#
+# The deck says what the repo decided. This says what it cost *you*: the afternoon the
+# invariant bit, the caller nobody warned you about. It is deliberately not part of the
+# card, because an update rewrites cards and must never touch this, and because it is one
+# person's experience rather than a fact about the repo. It lives under notes/, so it is
+# carried by `export` and survives a regenerate.
+
+NOTE_LINES = 6      # shown on the card; the rest is in the file
+
+
+def card_note_path(name: str, card_id: str) -> Path:
+    return deck_dir(name) / "notes" / "cards" / f"{card_id}.md"
+
+
+def read_card_note(name: str, card_id: str) -> str:
+    try:
+        return card_note_path(name, card_id).read_text().strip()
+    except OSError:
+        return ""
+
+
+def append_card_note(name: str, card_id: str, line: str) -> None:
+    path = card_note_path(name, card_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    existing = read_card_note(name, card_id)
+    path.write_text((existing + "\n" if existing else "") + line.strip() + "\n")
+
+
+def edit_card_note(name: str, card_id: str) -> bool:
+    """Open the note in $EDITOR, stepping out of the alt screen while it runs.
+
+    False when there is no editor to open, which is the caller's cue to take a line instead.
+    Raw mode is already off here: `read_key` restores it before returning.
+    """
+    editor = os.environ.get("VISUAL") or os.environ.get("EDITOR")
+    if not (editor and FULLSCREEN):
+        return False
+    path = card_note_path(name, card_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.touch(exist_ok=True)
+    sys.stdout.write(ALT_OFF)
+    sys.stdout.flush()
+    try:
+        subprocess.run([*shlex.split(editor), str(path)], check=False)
+    except (OSError, ValueError):
+        return False
+    finally:
+        sys.stdout.write(ALT_ON)
+        sys.stdout.flush()
+    return True
 
 
 def today() -> dt.date:
@@ -1553,6 +1607,11 @@ def run_session(queue: list[tuple], mode: str = "test") -> int:
                     i += 1
                 else:
                     revealed.add(i)
+            elif key == "e":
+                if not edit_card_note(entry["name"], card["id"]):
+                    line = read_line("note:", lambda buf: redraw(("note:", buf)))
+                    if line:
+                        append_card_note(entry["name"], card["id"], line)
             elif key == "t" and mode == "test" and i not in revealed:
                 typed = [read_line(label, lambda buf, lbl=label: redraw((lbl, buf)))
                          for label in ask_for(card, kind)]
@@ -1622,6 +1681,14 @@ def draw_card(queue, i, kind, root, cs, revealed, grade, mode="test", typing=Non
         body += render_answer(card, kind, inner - 2, root) + [""]
         anchor = str(card.get("anchor", "-"))
         body += [f"  {C['dim']}anchor{C['reset']}  {link(anchor, root, anchor)}", ""]
+        if note := read_card_note(entry["name"], card["id"]):
+            lines = note.split("\n")
+            body.append(f"  {sgr(109)}your note{C['reset']}")
+            body += [wrap(ln, inner - 2, "  ", style=C["dim"]) for ln in lines[:NOTE_LINES]]
+            if len(lines) > NOTE_LINES:
+                body.append(f"  {C['dim']}+{len(lines) - NOTE_LINES} more line(s) in "
+                            f"{card_note_path(entry['name'], card['id'])}{C['reset']}")
+            body.append("")
     if typing is not None:
         label, buf = typing
         body += [f"  {sgr(179)}{label}{C['reset']} {buf}\u2588", ""]
@@ -1637,14 +1704,17 @@ def draw_card(queue, i, kind, root, cs, revealed, grade, mode="test", typing=Non
     nav = hint("←/→", "move", 117)
     quit_ = hint("q", "quit", 245)
     flag = hint("f", "unflag" if cs.get("flagged") else "flag", 179)
+    note_key = hint("e", "note", 109)
     if mode == "learn":
-        parts = [nav, hint("l", "test", 214), flag, quit_]
+        parts = [nav, hint("l", "test", 214), flag, note_key, quit_]
     elif not revealed:
-        parts = [nav, hint("enter", "reveal", 109), hint("t", "type it", 79),
+        # `e` works here too, but the row is already at the width of an 80-column terminal
+        # and annotating a card you have not seen the answer to is the rarer thing to do.
+        parts = [nav, hint("enter", "reveal", 109), hint("t", "type", 79),
                  hint("l", "learn", 214), flag, quit_]
     else:
         parts = [nav, hint("y", "got it", 114), hint("n", "missed", 203),
-                 hint("l", "learn", 214), flag, quit_]
+                 hint("l", "learn", 214), flag, note_key, quit_]
     keys = f" {C['dim']}·{C['reset']} ".join(parts)
     mark = {"y": f"{sgr(114)}✓ got it{C['reset']}",
             "n": f"{sgr(203)}✗ missed{C['reset']}"}.get(grade, "")
@@ -2356,7 +2426,14 @@ def cmd_adopt(args) -> int:
             print(f"{C['red']}{new}: already has its own history, which this would overwrite{C['reset']}")
         else:
             state[new] = state.pop(old)
-            print(f"{C['green']}{old} -> {new}{C['reset']}  {C['dim']}box {state[new].get('box', 1)} kept{C['reset']}")
+            carried = ""
+            if (src := card_note_path(args.repo, old)).exists():
+                dest = card_note_path(args.repo, new)
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                src.replace(dest)
+                carried = ", note carried"
+            print(f"{C['green']}{old} -> {new}{C['reset']}  "
+                  f"{C['dim']}box {state[new].get('box', 1)} kept{carried}{C['reset']}")
             moved += 1
     if moved:
         save_state(args.repo, state)
@@ -2617,7 +2694,10 @@ def cmd_brief(args) -> int:
             print(f"{C['bold']}{n:>3}. {q[5:]}{C['reset']}")
             for pth, what in look_entries(card) or [(card.get("anchor", "-"), "")]:
                 print(f"{C['dim']}     ↳ {pth}{('  ' + what) if what else ''}{C['reset']}")
-            print(f"{C['cyan']}{wrap(card['a'], width, '     ')}{C['reset']}\n")
+            print(f"{C['cyan']}{wrap(card['a'], width, '     ')}{C['reset']}")
+            if note := read_card_note(entry["name"], card["id"]):
+                print(f"{sgr(109)}{wrap(note, width, '     ')}{C['reset']}")
+            print()
             shown += 1
 
     if not shown:

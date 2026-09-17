@@ -129,6 +129,20 @@ cannot: a card that was wrong the day it was written.
 **Two modes.** `test` (the default) hides the answer and is the only one that moves a card's box.
 `learn` shows everything and grades nothing. `l` switches mid-session.
 
+**`e` keeps your own note on a card**, in `$EDITOR` or as a typed line:
+
+```
+│   anchor  src/billing/outbox.py#enqueue                     │
+│                                                             │
+│   your note                                                 │
+│   bit me on the backfill in August: the replay re-rendered  │
+│   at today's rates                                          │
+```
+
+The deck says what the repo decided. The note says what it cost you, which is why it lives beside
+the deck rather than in it: an update rewrites cards and never touches your notes. They show under
+the answer and in `brief`, travel with `export`, and follow a card through a rename.
+
 **Not every card is a plain question.** `cloze` blanks out the load-bearing words, `order` shuffles
 a sequence, and `locate` asks *where you would look*, treating the routes as the answer. A recall
 card with good routes is asked that way about one time in six.

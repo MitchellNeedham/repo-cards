@@ -384,6 +384,13 @@ seriously: "rendered in the worker now, not at send time" points straight at wha
 the flag alone only says which card to doubt. The note is raised after the flag, so an abandoned
 prompt still leaves the flag standing.
 
+**`e` writes your own note on a card**, opened in `$EDITOR` where there is one and taken as a line
+otherwise. It is kept in `notes/cards/<id>.md`, not on the card, for two reasons: an update rewrites
+cards and must never touch it, and it is one person's experience rather than a fact about the repo.
+The deck says what the repo decided; the note says what it cost you. It shows under the answer, in
+`brief`, and travels with `export`. **Never fold a note into a card's answer**, and never edit one
+during an update.
+
 `brief` is the read-only counterpart, in deck or topic order rather than shuffled, for rebuilding a
 mental model rather than testing it. Suggest it when somebody says they have a meeting about an
 area, or are returning to a repo after a while.
