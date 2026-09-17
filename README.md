@@ -228,6 +228,21 @@ boxes, so importing a colleague's deck costs you nothing you had learned.
   outranks one pointing at a decision nobody has revisited in three.
 - **Priority is weighted, with a starvation guard.** A card's score also falls the longer it stays
   overdue. Simulated over 180 days at 15 cards a day across eight decks, weighting alone left 455
-  of 640 cards never seen; with the guard, none.
+  of 640 cards never seen; with the guard, none. That simulation is
+  `tests/simulate_starvation.py`, so the claim can be re-run rather than believed.
+
+## Development
+
+One uv script, one dependency, and tests that need nothing installed:
+
+```bash
+uv run --with pytest --with pyyaml pytest tests/ -q
+./tests/simulate_starvation.py
+```
+
+The suite covers the places where being wrong is silent rather than loud: box transitions and
+queue order, drift's symbol narrowing and per-card `verified` baselines, cross-repo refs, the
+git date handling, and every rule `check` enforces. A mis-ordered queue still looks like a
+queue, which is why it is worth a test and a `--help` is not.
 
 MIT.

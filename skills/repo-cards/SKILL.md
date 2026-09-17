@@ -384,7 +384,8 @@ step, because a fact you have lost is not most of the way to known.
 ## Notes
 
 * `repo-cards` is a `uv` script with an inline dependency on `pyyaml`. It needs `uv` on PATH and
-  has no virtualenv of its own.
+  has no virtualenv of its own. Its tests run with
+  `uv run --with pytest --with pyyaml pytest tests/ -q` from the plugin's own checkout.
 * Never regenerate or hand-edit `state.json`. If a card's meaning changes enough that its history is
   misleading, give it a new id, which resets it honestly. `repo-cards adopt` is the one supported
   way to move an entry, and it exists for the opposite case: the id changed but the fact did not.
