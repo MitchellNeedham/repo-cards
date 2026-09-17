@@ -48,6 +48,10 @@ Anything `grep` answers in ten seconds is excluded on purpose.
 answer the question yourself, shown **before** the answer so you can go and check. `anchor` is the
 one place the fact is defined, and is what drift and churn are measured on.
 
+A path may also name another registered repo, as `sfap::src/api/contract.py#handshake`. The
+expensive knowledge in a pair of services is usually the contract between them, and a card about
+it has to be verified when *either* side moves.
+
 ## Use
 
 From Claude Code, inside the repo you want carded:

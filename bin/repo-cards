@@ -173,9 +173,54 @@ def load_registry() -> list[dict]:
 
 
 def save_registry(repos: list[dict]) -> None:
+    global _ROOTS
+    _ROOTS = None
     p = registry_path()
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps({"repos": repos}, indent=2) + "\n")
+
+
+# --- cross-repo refs ---------------------------------------------------------
+#
+# A path on a card is repo-relative. `name::path` points into another registered repo, and
+# exists because the most expensive knowledge in a pair of services is the contract between
+# them, whose two halves live in different working trees. Drift, churn, the recent-commit
+# topics and the dead path check all follow the qualifier, so a card in one deck is flagged
+# for verification when the other repo moves under it.
+#
+# `::` rather than `:` so a Windows drive letter cannot be mistaken for a repo name.
+
+REF = re.compile(r"^(?P<repo>[A-Za-z0-9._-]+)::(?P<path>.+)$")
+
+_ROOTS: dict[str, Path] | None = None
+
+
+def registry_roots() -> dict[str, Path]:
+    """Repo name -> root, read once. Invalidated by save_registry."""
+    global _ROOTS
+    if _ROOTS is None:
+        _ROOTS = {r["name"]: Path(r["root"]).expanduser() for r in load_registry()}
+    return _ROOTS
+
+
+def split_ref(ref: str) -> tuple[str | None, str]:
+    """`name::path` as (repo, path); a bare path as (None, path). Any #symbol is kept."""
+    m = REF.match(str(ref))
+    return (m["repo"], m["path"]) if m else (None, str(ref))
+
+
+def resolve_ref(ref: str, root: Path) -> tuple[Path | None, str]:
+    """(root, repo-relative path) for one ref, symbol stripped.
+
+    A root of None means the ref names a repo that is not registered here. That is reported
+    rather than skipped: it is either a typo in the deck or a `repo-cards register` nobody
+    ran, and both make the route unfollowable.
+    """
+    name, path = split_ref(ref)
+    path = path.split("#")[0]
+    if name is None:
+        return root, path
+    return registry_roots().get(name), path
 
 
 def load_deck(entry: dict, quiet: bool = False) -> tuple[dict, list[dict]] | None:
@@ -237,11 +282,25 @@ def look_entries(card: dict) -> list[tuple[str, str]]:
     return [(str(x), "") for x in look]
 
 
-def all_paths(card: dict) -> list[str]:
-    """Every repo path a card points at, anchor first, symbols stripped."""
+def all_refs(card: dict) -> list[str]:
+    """Every ref a card points at, anchor first, symbols stripped, qualifiers kept."""
     out = [str(card.get("anchor", "")).split("#")[0]]
     out += [pth.split("#")[0] for pth, _ in look_entries(card)]
     return [x for x in out if x]
+
+
+def local_paths(card: dict, name: str) -> list[str]:
+    """The refs that live in repo `name`, as repo-relative paths.
+
+    Coverage is a question about one working tree, so a ref into another repo says nothing
+    about whether this repo's changed files are carded.
+    """
+    out = []
+    for ref in all_refs(card):
+        repo, path = split_ref(ref)
+        if repo is None or repo == name:
+            out.append(path)
+    return out
 
 
 def priority_of(card: dict) -> int:
@@ -264,22 +323,42 @@ def card_date(card: dict, deck: dict) -> dt.date | None:
         return None
 
 
+_CHURN_CACHE: dict[tuple[str, int], dict[str, int]] = {}
+
+
 def repo_churn(root: Path, days: int = CHURN_WINDOW_DAYS) -> dict[str, int]:
-    """Commits touching each path in the window. One git call for the whole repo."""
+    """Commits touching each path in the window. One git call per repo, cached, because a
+    deck with cross-repo anchors asks for several roots in a single pass."""
+    key = (str(root), days)
+    if key in _CHURN_CACHE:
+        return _CHURN_CACHE[key]
     out = git(root, "log", f"--since={days} days ago", "--name-only", "--pretty=format:")
     counts: dict[str, int] = {}
     for line in out.split("\n"):
         if line := line.strip():
             counts[line] = counts.get(line, 0) + 1
+    _CHURN_CACHE[key] = counts
     return counts
 
 
 def churn_context(entry: dict, cards: list[dict]) -> tuple[dict[str, int], float]:
-    """Churn counts plus the deck's own 90th percentile, which is what normalises them."""
+    """Churn counts plus the deck's own 90th percentile, which is what normalises them.
+
+    Keyed by the anchor as written, because a `name::path` anchor is counted in the repo it
+    names: a card about another service's contract is at risk when *that* repo moves.
+    """
     root = Path(entry["root"]).expanduser()
-    if not root.is_dir():
+    counts: dict[str, int] = {}
+    for c in cards:
+        ref = str(c.get("anchor", "")).split("#")[0]
+        if not ref or ref in counts:
+            continue
+        other, path = resolve_ref(ref, root)
+        if other is None or not other.is_dir():
+            continue
+        counts[ref] = repo_churn(other).get(path, 0)
+    if not counts:
         return {}, 0.0
-    counts = repo_churn(root)
     vals = sorted(counts.get(str(c.get("anchor", "")).split("#")[0], 0) for c in cards)
     p90 = vals[int(len(vals) * 0.9)] if vals else 0
     return counts, float(p90)
@@ -384,9 +463,13 @@ def compute_topics(root: Path, cards: list[dict]) -> dict:
         return {}
     out = {}
     for name, days in RECENT_WINDOWS:
-        touched = repo_touch(root, days)
-        hits = [(ts, c) for c in cards
-                if (ts := touched.get(str(c.get("anchor", "")).split("#")[0], 0))]
+        hits = []
+        for c in cards:
+            other, path = resolve_ref(str(c.get("anchor", "")), root)
+            if other is None or not other.is_dir():
+                continue
+            if ts := repo_touch(other, days).get(path, 0):
+                hits.append((ts, c))
         # A window that covers the whole deck is not a filter, and a big refactor makes that
         # happen easily. It starts being useful when it narrows something.
         if not hits or len(hits) > 0.8 * len(cards):
@@ -716,7 +799,10 @@ def link(text: str, root: Path, path: str) -> str:
     """`text` as an OSC 8 hyperlink to path, when the terminal can do it."""
     if not HYPERLINKS:
         return text
-    target = root / path.split("#")[0]
+    other, rel = resolve_ref(path, root)
+    if other is None:
+        return text
+    target = other / rel
     try:
         uri = target.resolve().as_uri()
     except (ValueError, OSError):
@@ -1465,6 +1551,32 @@ def cmd_list(args) -> int:
 
 # --- drift: the mechanical half of `update` ----------------------------------
 
+def since_arg(date: str) -> str:
+    """A date pinned to midnight, for `git log --since`.
+
+    Git's approxidate reads a bare `2026-09-17` as that date at the *current time of day*,
+    not as midnight, so a deck written this morning silently misses this morning's commits.
+    """
+    return f"{date} 00:00:00"
+
+
+_CHANGED_SINCE: dict[tuple[str, str], set[str]] = {}
+
+
+def changed_since_date(root: Path, since: str) -> set[str]:
+    """Files touched in `root` since a date.
+
+    Another repo has no commit in common with this deck's baseline sha, so the date the deck
+    was last updated is the only baseline the two share. Coarser than a sha range, and the
+    right kind of coarse: it over-reports rather than missing a change.
+    """
+    key = (str(root), since)
+    if key not in _CHANGED_SINCE:
+        out = git(root, "log", f"--since={since_arg(since)}", "--name-only", "--format=")
+        _CHANGED_SINCE[key] = {ln.strip() for ln in out.split("\n") if ln.strip()}
+    return _CHANGED_SINCE[key]
+
+
 def git(root: Path, *args: str) -> str:
     try:
         return subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True, check=True).stdout.strip()
@@ -1477,18 +1589,23 @@ def drift_facts(entry: dict) -> dict:
     root = Path(entry["root"]).expanduser()
     f = {"name": entry["name"], "root": root, "sha": None, "cards": [], "head": "", "log": "",
          "changed": [], "hot": [], "cold": [], "routes": [], "dead": [], "uncovered": [],
-         "status": "", "regen": False}
+         "unknown_repo": [], "status": "", "regen": False}
 
     def note_dead() -> None:
         """Paths a card points at that are not in the repo any more.
 
         Worth checking whatever the deck's sha says: a path can be wrong from the day it was
-        written, and a route that 404s teaches the reader nothing.
+        written, and a route that 404s teaches the reader nothing. A `name::path` ref is
+        checked against the repo it names, and one naming an unregistered repo is its own
+        kind of broken.
         """
         for c in f["cards"]:
-            for pth in all_paths(c):
-                if not (root / pth).exists():
-                    f["dead"].append((c["id"], pth))
+            for ref in all_refs(c):
+                other, path = resolve_ref(ref, root)
+                if other is None:
+                    f["unknown_repo"].append((c["id"], ref))
+                elif not (other / path).exists():
+                    f["dead"].append((c["id"], ref))
 
     loaded = load_deck(entry, quiet=True)
     if loaded is None:
@@ -1510,37 +1627,65 @@ def drift_facts(entry: dict) -> dict:
         f["status"] = "no baseline"
         return f
     if sha == f["head"]:
+        # Not an early return any more: a card anchored into another repo can be stale while
+        # nothing here has moved at all, and that is exactly the case a sha comparison misses.
         f["status"] = "up to date"
-        return f
-
-    f["status"] = "behind"
-    f["log"] = git(root, "log", "--oneline", f"{sha}..HEAD")
-    f["changed"] = [x for x in git(root, "diff", "--name-only", f"{sha}..HEAD").split("\n") if x]
+    else:
+        f["status"] = "behind"
+        f["log"] = git(root, "log", "--oneline", f"{sha}..HEAD")
+        f["changed"] = [x for x in git(root, "diff", "--name-only", f"{sha}..HEAD").split("\n") if x]
 
     # An anchor carrying #symbol is narrowed further: one commit to a 700-line module
     # should not flag every card drawn from it, or the update drowns in false positives.
     changed_set, diff_cache = set(f["changed"]), {}
+    since = str(deck.get("last_update_date") or "")
+
+    def foreign_changed(repo: str) -> set[str] | None:
+        """What has moved in another registered repo since this deck was written."""
+        other = registry_roots().get(repo)
+        if other is None or not other.is_dir() or not since:
+            return None
+        return changed_since_date(other, since)
+
     for c in cards:
-        path, _, symbol = str(c.get("anchor", "")).partition("#")
+        repo, rest = split_ref(str(c.get("anchor", "")))
+        path, _, symbol = rest.partition("#")
         if not path:
             continue
-        if not (path in changed_set or any(x.startswith(path.rstrip("/") + "/") for x in changed_set)):
+        if repo is None or repo == f["name"]:
+            changed = changed_set
+        elif (changed := foreign_changed(repo)) is None:
+            continue
+        if not (path in changed or any(x.startswith(path.rstrip("/") + "/") for x in changed)):
             continue
         if not symbol:
             f["hot"].append(c)
             continue
-        if path not in diff_cache:
-            diff_cache[path] = git(root, "diff", "-U5", f"{sha}..HEAD", "--", path)
+        if (repo, path) not in diff_cache:
+            if repo is None or repo == f["name"]:
+                patch = git(root, "diff", "-U5", f"{sha}..HEAD", "--", path)
+            else:
+                patch = git(registry_roots()[repo], "log", f"--since={since_arg(since)}",
+                            "--format=", "-U5", "-p", "--", path)
+            diff_cache[(repo, path)] = patch
         # Hunk headers carry the enclosing function name, so a symbol absent from the
         # whole diff was very likely not touched.
-        (f["hot"] if symbol in diff_cache[path] else f["cold"]).append(c)
+        (f["hot"] if symbol in diff_cache[(repo, path)] else f["cold"]).append(c)
 
     hot_ids = {c["id"] for c in f["hot"]}
     for c in cards:
         if c["id"] in hot_ids:
             continue
-        touched = [pth for pth, _ in look_entries(c)
-                   if pth.split("#")[0] in changed_set]
+        touched = []
+        for pth, _ in look_entries(c):
+            repo, rest = split_ref(pth)
+            local = rest.split("#")[0]
+            if repo is None or repo == f["name"]:
+                hit = local in changed_set
+            else:
+                hit = local in (foreign_changed(repo) or set())
+            if hit:
+                touched.append(pth)
         if touched:
             f["routes"].append((c, touched))
 
@@ -1548,8 +1693,10 @@ def drift_facts(entry: dict) -> dict:
     dead_frac = len({cid for cid, _ in f["dead"]}) / max(1, len(cards))
     f["regen"] = behind_n > REGEN_COMMITS or dead_frac > REGEN_DEAD_FRACTION
 
-    covered = {pth for c in cards for pth in all_paths(c)}
+    covered = {pth for c in cards for pth in local_paths(c, f["name"])}
     f["uncovered"] = [x for x in f["changed"] if x not in covered]
+    if f["status"] == "up to date" and f["hot"]:
+        f["status"] = "linked moved"
     return f
 
 
@@ -1570,16 +1717,19 @@ def print_drift_detail(f: dict) -> None:
         return
     if f["status"] == "up to date":
         print(f"{C['green']}up to date, no commits since the deck was generated{C['reset']}")
-        return
-
-    print(f"\n--- commits since {f['sha']} ({len(f['log'].splitlines())}) ---\n{f['log']}")
-    print(f"\n--- files changed ({len(f['changed'])}) ---")
-    print("\n".join(f"  {x}" for x in f["changed"]) or "  (none)")
-    if f.get("regen"):
-        print(f"\n{C['yellow']}Drifted far enough that a regenerate is likely cheaper than "
-              f"verifying this card by card.{C['reset']}")
-    print(f"\n--- cards whose anchor changed ({len(f['hot'])}) : VERIFY THESE ---")
-    print("\n".join(f"  {c['id']:<40} {c['anchor']}" for c in f["hot"]) or "  (none)")
+    elif f["status"] == "linked moved":
+        print(f"{C['yellow']}no commits here since the deck was written, but a repo these cards "
+              f"point into has moved{C['reset']}")
+    else:
+        print(f"\n--- commits since {f['sha']} ({len(f['log'].splitlines())}) ---\n{f['log']}")
+        print(f"\n--- files changed ({len(f['changed'])}) ---")
+        print("\n".join(f"  {x}" for x in f["changed"]) or "  (none)")
+        if f.get("regen"):
+            print(f"\n{C['yellow']}Drifted far enough that a regenerate is likely cheaper than "
+                  f"verifying this card by card.{C['reset']}")
+    if f["hot"] or f["status"] == "behind":
+        print(f"\n--- cards whose anchor changed ({len(f['hot'])}) : VERIFY THESE ---")
+        print("\n".join(f"  {c['id']:<40} {c['anchor']}" for c in f["hot"]) or "  (none)")
     if f["cold"]:
         print(f"\n--- file changed but the anchored symbol was not touched ({len(f['cold'])}) : likely fine ---")
         print("\n".join(f"  {c['id']:<40} {c['anchor']}" for c in f["cold"]))
@@ -1591,8 +1741,13 @@ def print_drift_detail(f: dict) -> None:
         print(f"\n--- paths that no longer exist ({len(f['dead'])}) : FIX THESE ---")
         for cid, pth in f["dead"]:
             print(f"  {cid:<40} {pth}")
-    print(f"\n--- changed files no card points at ({len(f['uncovered'])}) : CANDIDATES ---")
-    print("\n".join(f"  {x}" for x in f["uncovered"]) or "  (none)")
+    if f["unknown_repo"]:
+        print(f"\n--- refs naming an unregistered repo ({len(f['unknown_repo'])}) : register it or fix the ref ---")
+        for cid, pth in f["unknown_repo"]:
+            print(f"  {cid:<40} {pth}")
+    if f["status"] == "behind":
+        print(f"\n--- changed files no card points at ({len(f['uncovered'])}) : CANDIDATES ---")
+        print("\n".join(f"  {x}" for x in f["uncovered"]) or "  (none)")
 
 
 def cmd_drift(args) -> int:
@@ -1617,16 +1772,20 @@ def cmd_drift(args) -> int:
         return 0
 
     behind = [f for f in facts if f["status"] == "behind"]
+    linked = [f for f in facts if f["status"] == "linked moved"]
     ungenerated = [f for f in facts if f["status"] == "no deck"]
-    rank = {"behind": 0, "no deck": 1, "root missing": 2, "no baseline": 3, "up to date": 4}
-    colours = {"behind": C["yellow"], "up to date": C["green"], "no deck": C["dim"]}
+    rank = {"behind": 0, "linked moved": 1, "no deck": 2, "root missing": 3,
+            "no baseline": 4, "up to date": 5}
+    colours = {"behind": C["yellow"], "linked moved": C["yellow"], "up to date": C["green"],
+               "no deck": C["dim"]}
 
     print(f"\n  {'repo':<20} {'commits':>8} {'verify':>7} {'routes':>7} {'dead':>5} {'new files':>10}   state")
     for f in sorted(facts, key=lambda x: (rank.get(x["status"], 9), -len(x["hot"]))):
         colour = colours.get(f["status"], C["red"])
         dead = f"{C['red']}{len(f['dead'])}{C['reset']}" if f["dead"] else "-"
-        if f["status"] == "behind":
-            cols = (str(len(f["log"].splitlines())), str(len(f["hot"])), str(len(f["routes"])), str(len(f["uncovered"])))
+        if f["status"] in ("behind", "linked moved"):
+            n = len(f["log"].splitlines())
+            cols = (str(n) if n else "-", str(len(f["hot"])), str(len(f["routes"])), str(len(f["uncovered"])))
         else:
             cols = ("-", "-", "-", "-")
         print(f"  {f['name']:<20} {cols[0]:>8} {cols[1]:>7} {cols[2]:>7} {dead:>5} {cols[3]:>10}   {colour}{f['status']}{C['reset']}")
@@ -1639,10 +1798,13 @@ def cmd_drift(args) -> int:
         names = ", ".join(f["name"] for f in regen)
         print(f"  {C['yellow']}{names}: far enough behind that a regenerate beats an update"
               f"{C['reset']}\n  {C['dim']}Ask Claude for{C['reset']} /repo-cards:generate")
+    if linked:
+        names = ", ".join(f["name"] for f in linked)
+        print(f"  {names}: no commits here, but a linked repo moved under some cards")
     if ungenerated:
         print(f"  {len(ungenerated)} repo(s) registered with no deck: {', '.join(f['name'] for f in ungenerated)}")
         print(f"  {C['dim']}Generate one by running /repo-cards:generate from inside it.{C['reset']}")
-    if not behind and not ungenerated:
+    if not behind and not linked and not ungenerated:
         print(f"  {C['green']}Every deck is current.{C['reset']}")
     print()
     return 0

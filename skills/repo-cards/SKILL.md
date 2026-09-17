@@ -66,7 +66,8 @@ recognition-level knowledge that belongs in a document, not a deck.
 
 * **Invariants.** Rules where a violation is a defect rather than a preference.
 * **Load-bearing splits.** Which component owns what, and *why the boundary is where it is*. A
-  boundary someone can talk themselves across is the expensive kind.
+  boundary someone can talk themselves across is the expensive kind. Where the two sides live in
+  different repos, anchor across with `other-repo::path` (see `look` below).
 * **Reasoning behind decisions.** Not the verdict, the argument. The verdict alone does not stop
   the decision being reopened. Where the repo has stable decision ids cited in code comments
   (`ADR-7`, `RFC-12`, `D-3`), build cards on them: they are stable, they are already the vocabulary,
@@ -184,6 +185,15 @@ file-level hit by checking whether the symbol appears in the diff, and splits it
 to verify and cards where the file moved but the symbol did not. Without symbols, one commit to a
 large module flags every card drawn from it and the update drowns in false positives. Measured on a
 real 17-commit window, this was the difference between 28 cards to verify and 16.
+
+**A path may name another registered repo**, written `name::path/to/thing#symbol`, where `name`
+is what `repo-cards repos` calls it. That is for the knowledge that lives *between* two services:
+the contract, and the assumption each side makes about the other. Drift, churn and the computed
+recent topics all follow the qualifier, so a card in one deck is flagged for verification when the
+other repo moves under it, and `repo-cards drift` reports a deck as `linked moved` when its own
+repo is untouched but a linked one is not. Use it for facts that genuinely span a boundary, and
+check the other repo is registered first: a ref naming an unregistered repo is reported as broken,
+because nobody can follow it.
 
 Use YAML `>-` for prose and `|-` where line structure matters (tables, ordered lists). Avoid
 unquoted colons in plain scalars.
