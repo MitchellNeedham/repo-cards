@@ -875,6 +875,72 @@ def frame(lines: list[str], width: int, *, head: str = "", head_right: str = "",
     return out
 
 
+# --- the page ----------------------------------------------------------------
+#
+# A card is drawn full bleed rather than boxed. A border costs four columns of text and buys
+# a shape the content already has: one thing on the screen, with nothing competing for the
+# eye. A margin and two rules say the same and leave the words more room. The measure is
+# still capped, for the reason it always was: a line 160 columns wide is hard to read back
+# to.
+
+PAGE_MARGIN = 2
+
+
+def page_layout(cols: int) -> tuple[int, int]:
+    """(text width, left margin), the column centred in a wide terminal."""
+    width = min(max(MIN_WIDTH, cols - 2 * PAGE_MARGIN), TARGET_WIDTH)
+    return width, max(PAGE_MARGIN, (cols - width) // 2)
+
+
+def spread(left: str, right: str, width: int) -> str:
+    """Two labels pushed to the edges. The right one goes first if they collide."""
+    room = width - visible_len(left) - visible_len(right)
+    if room < 2:
+        return ansi_truncate(left, width)
+    return f"{left}{' ' * room}{right}"
+
+
+def draw_page(head: str, head_right: str, blocks: list[str], foot: str,
+              foot_right: str = "", strip: str = "") -> None:
+    """One screen: a header, a rule, the content, a rule, the keys.
+
+    Content is trimmed of its padding before anything is truncated, and centred in whatever
+    is left, so a short card is not pinned to the top of a tall terminal.
+    """
+    cols, rows = shutil.get_terminal_size((90, 24))
+    width, left = page_layout(cols)
+    pad = " " * left
+    rule = f"{C['dim']}{'─' * width}{C['reset']}"
+
+    flat: list[str] = []
+    for block in blocks:
+        flat.extend(block.split("\n"))
+    flat = [rule if ln == DIVIDER else ln for ln in flat]
+
+    budget = max(1, rows - (5 if strip else 4))
+    while len(flat) > budget and "" in flat:
+        flat.remove("")
+    flat = flat[:budget]
+    slack = max(0, budget - len(flat))
+
+    out = [pad + spread(head, head_right, width)]
+    if strip:
+        out.append(pad + strip)
+    out.append(pad + rule)
+    out += [""] * (slack // 2)
+    # A blank line stays blank: padding it leaves trailing whitespace on every empty row,
+    # which shows up the moment anybody selects text.
+    out += ["" if not ln.strip() else
+            pad + (ansi_truncate(ln, width) if visible_len(ln) > width else ln) for ln in flat]
+    out += [""] * (slack - slack // 2)
+    out.append(pad + rule)
+    out.append(pad + spread(foot, foot_right, width))
+
+    sys.stdout.write("\033[H\033[J" if FULLSCREEN else "\n")
+    sys.stdout.write("\n".join(out) + "\n")
+    sys.stdout.flush()
+
+
 def link(text: str, root: Path, path: str) -> str:
     """`text` as an OSC 8 hyperlink to path, when the terminal can do it."""
     if not HYPERLINKS:
@@ -1641,106 +1707,84 @@ def run_session(queue: list[tuple], mode: str = "test") -> int:
     return finish_session(queue, graded, dirty)
 
 
+def key_hint(key: str, label: str, colour: int) -> str:
+    return f"{sgr(colour)}{key}{C['reset']} {C['dim']}{label}{C['reset']}"
+
+
+def card_keys(kind: str, cs: dict, revealed: bool, mode: str) -> str:
+    """Only the keys that do something here. The rest live behind `?`."""
+    nav = key_hint("←/→", "move", 117)
+    flag = key_hint("f", "unflag" if cs.get("flagged") else "flag", 179)
+    helps = key_hint("?", "keys", 245)
+    if mode == "learn":
+        parts = [nav, key_hint("l", "test", 214), flag, key_hint("e", "note", 109), helps]
+    elif not revealed:
+        parts = [nav, key_hint("enter", "reveal", 109), key_hint("t", "type", 79), flag, helps]
+    else:
+        parts = [nav, key_hint("y", "got it", 114), key_hint("n", "missed", 203),
+                 key_hint("e", "note", 109), helps]
+    return f" {C['dim']}·{C['reset']} ".join(parts)
+
+
+def card_state_mark(cs: dict, grade: str | None) -> str:
+    """What the reader has already done to this card, at the far end of the key row."""
+    out = {"y": f"{sgr(114)}✓ got it{C['reset']}",
+           "n": f"{sgr(203)}✗ missed{C['reset']}"}.get(grade, "")
+    if cs.get("flagged"):
+        out = (out + "  " if out else "") + f"{sgr(179)}⚑{C['reset']}"
+    return out
+
+
 def draw_card(queue, i, kind, root, cs, revealed, grade, mode="test", typing=None,
               checked=None) -> None:
     entry, card, _state, _deck, _churn = queue[i]
-    cols, rows = shutil.get_terminal_size((90, 24))
-    # Wrap to the widest the box may ever be, then shrink the box to what the text used.
-    inner = min(max(MIN_WIDTH, min(TARGET_WIDTH, cols - 2)), max(20, cols - 2)) - 4
+    cols, _rows = shutil.get_terminal_size((90, 24))
+    width, _left = page_layout(cols)
+    text_width = width - 2
 
     repo = entry["name"]
-    accent = name_colour(repo)
     pri = priority_of(card)
     siblings = tuple(all_topics(_deck).keys())
     topics = topics_of(card, _deck)
 
-    head = f"{accent}{repo}{C['reset']}"
     shown_kind = "learn" if mode == "learn" else kind_label(kind)
     kind_col = sgr(214 if mode == "learn" else KIND_COLOUR[kind])
-    head += f" {C['dim']}·{C['reset']} {kind_col}{shown_kind}{C['reset']}"
-
+    head = (f"{name_colour(repo)}{repo}{C['reset']} {C['dim']}·{C['reset']} "
+            f"{kind_col}{shown_kind}{C['reset']}")
     head_right = (f"{C['dim']}{i + 1}/{len(queue)}{C['reset']}  "
                   f"{sgr(BOX_COLOUR[cs['box']])}box {cs['box']}{C['reset']}  "
                   f"{sgr(PRIORITY_COLOUR[pri])}{'★' * (4 - pri)}{C['reset']}")
 
-    body: list[str] = [""]
+    body: list[str] = []
     if topics:
         body.append("  " + "  ".join(
             f"{topic_colour(t, siblings)}▌{t}{C['reset']}" for t in topics[:3]))
         body.append("")
-    body += render_prompt(card, kind, inner - 2, root) + [""]
+    body += render_prompt(card, kind, text_width, root)
     if revealed:
-        body += [DIVIDER, ""]
+        body += ["", DIVIDER, ""]
         if checked and checked.get("parts") is not None:
-            # In the body rather than the footer: the footer is already carrying the keys and
-            # the grade, and this is the sentence that says the grade is not final.
-            body += render_check(checked["parts"], inner - 2)
+            body += render_check(checked["parts"], text_width)
             body += [f"  {C['dim']}marked from what you typed · y or n overrides{C['reset']}", ""]
         elif checked:
-            body += render_overlap(checked["typed"], checked["overlap"], inner - 2) + [""]
-        body += render_answer(card, kind, inner - 2, root) + [""]
+            body += render_overlap(checked["typed"], checked["overlap"], text_width) + [""]
+        body += render_answer(card, kind, text_width, root) + [""]
         anchor = str(card.get("anchor", "-"))
-        body += [f"  {C['dim']}anchor{C['reset']}  {link(anchor, root, anchor)}", ""]
+        body += [f"  {C['dim']}⚓{C['reset']}  {link(anchor, root, anchor)}"]
         if note := read_card_note(entry["name"], card["id"]):
             lines = note.split("\n")
-            body.append(f"  {sgr(109)}your note{C['reset']}")
-            body += [wrap(ln, inner - 2, "  ", style=C["dim"]) for ln in lines[:NOTE_LINES]]
+            body += [""]
+            body += [f"  {sgr(109)}✎{C['reset']}  " + wrap(lines[0], text_width, "     ",
+                                                          style=C["dim"])[5:]]
+            body += [wrap(ln, text_width, "     ", style=C["dim"]) for ln in lines[1:NOTE_LINES]]
             if len(lines) > NOTE_LINES:
-                body.append(f"  {C['dim']}+{len(lines) - NOTE_LINES} more line(s) in "
-                            f"{card_note_path(entry['name'], card['id'])}{C['reset']}")
-            body.append("")
+                body.append(f"     {C['dim']}+{len(lines) - NOTE_LINES} more line(s){C['reset']}")
     if typing is not None:
         label, buf = typing
-        body += [f"  {sgr(179)}{label}{C['reset']} {buf}\u2588", ""]
+        body += ["", f"  {sgr(179)}{label}{C['reset']} {buf}\u2588"]
 
-    # Wrapped lines arrive as one string per block; split so the frame pads each row.
-    flat: list[str] = []
-    for block in body:
-        flat.extend(block.split("\n"))
-
-    def hint(key: str, label: str, colour: int) -> str:
-        return f"{sgr(colour)}{key}{C['reset']} {C['dim']}{label}{C['reset']}"
-
-    nav = hint("←/→", "move", 117)
-    quit_ = hint("q", "quit", 245)
-    flag = hint("f", "unflag" if cs.get("flagged") else "flag", 179)
-    note_key = hint("e", "note", 109)
-    if mode == "learn":
-        parts = [nav, hint("l", "test", 214), flag, note_key, quit_]
-    elif not revealed:
-        # `e` works here too, but the row is already at the width of an 80-column terminal
-        # and annotating a card you have not seen the answer to is the rarer thing to do.
-        parts = [nav, hint("enter", "reveal", 109), hint("t", "type", 79),
-                 hint("l", "learn", 214), flag, quit_]
-    else:
-        parts = [nav, hint("y", "got it", 114), hint("n", "missed", 203),
-                 hint("l", "learn", 214), flag, note_key, quit_]
-    keys = f" {C['dim']}·{C['reset']} ".join(parts)
-    mark = {"y": f"{sgr(114)}✓ got it{C['reset']}",
-            "n": f"{sgr(203)}✗ missed{C['reset']}"}.get(grade, "")
-    if cs.get("flagged"):
-        mark = (mark + "  " if mark else "") + f"{sgr(179)}⚑ flagged{C['reset']}"
-        if cs.get("flag_note"):
-            mark += f"{sgr(179)} +note{C['reset']}"
-    foot = keys + (f"  {mark}" if mark else "")
-
-    # Trim from the middle padding rather than the content if the card is taller than the
-    # terminal: losing a blank line is invisible, losing the answer is not.
-    budget = rows - 3
-    while len(flat) > budget and "" in flat:
-        flat.remove("")
-    flat = flat[:budget]
-    # Located after trimming, never tracked through it: an index into a list that blank-line
-    # removal is rewriting is exactly how the rule ended up under the answer.
-    divider = flat.index(DIVIDER) if DIVIDER in flat else None
-    flat = [ln for ln in flat if ln != DIVIDER]
-    width = fit_width(flat, cols, f"{head} {head_right}", foot)
-    boxed = frame(flat, width, head=head, head_right=head_right,
-                  foot=foot, border=f"{C['dim']}{accent}", divider_at=divider)
-
-    sys.stdout.write("\033[H\033[J" if FULLSCREEN else "\n")
-    sys.stdout.write(place(boxed, cols, rows, centre=FULLSCREEN) + "\n")
-    sys.stdout.flush()
+    draw_page(head, head_right, body,
+              card_keys(kind, cs, revealed, mode), card_state_mark(cs, grade))
 
 
 # SGR colour codes and OSC 8 hyperlink wrappers both occupy no columns.
