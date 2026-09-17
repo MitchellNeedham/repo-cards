@@ -109,6 +109,12 @@ Then one card at a time, sized to its content and centred:
 `←`/`→` move, `enter` reveals, `y`/`n` grade. Boxes 1 to 5, due after 1, 2, 4, 8 and 16 days; a
 miss drops to box 1, because a fact you have lost is not most of the way to known.
 
+**`f` flags a card you do not believe.** "I forgot this" and "this is not true any more" are
+different facts and only the second one is a defect, so a flag grades nothing. It lands at the top
+of the next `drift` and is the first thing an update looks at, which is how review feeds the deck
+rather than only consuming it. On a repo that moves weekly, this catches what git cannot: a card
+that was wrong the day it was written.
+
 **Two modes.** `test` (the default) hides the answer and is the only one that moves a card's box.
 `learn` shows everything and grades nothing. `l` switches mid-session.
 
@@ -125,14 +131,15 @@ maintenance and are the fastest way back in after time away.
 ```
 $ repo-cards drift
 
-  repo          commits  verify  routes  dead  new files   state
-  billing            12       7       3     1          4   behind
-  checkout            5      10       0     -         11   behind
-  platform            -       -       -     -          -   up to date
-  search-api          -       -       -     -          -   no deck
+  repo          commits  verify  flagged  routes  dead  new files   state
+  billing            12       7        2       3     1          4   behind
+  checkout            5      10        -       0     -         11   behind
+  platform            -       -        1       -     -          -   up to date
+  search-api          -       -        -       -     -          -   no deck
 
   2 deck(s) behind. Detail: repo-cards drift --repo <name>
   billing: far enough behind that a regenerate beats an update
+  3 card(s) flagged during review in billing, platform. Detail: repo-cards flags
 ```
 
 ## Commands
@@ -145,6 +152,7 @@ $ repo-cards drift
 | `--repo N` `--tag a,b` `--grep RE` `--topic T` `--priority 1` | narrow the session |
 | `--limit N` `--new` `--all` `--no-pick` | cap it, unseen only, ignore due dates, skip the picker |
 | `topics` `stats` `list` `drift` | what exists, deck health, every card, what changed |
+| `flags` `flags --clear` | cards you marked suspect during review, and clearing them |
 | `register PATH` `forget NAME` `repos` `home` | the registry, and where things live |
 
 ## Where data lives

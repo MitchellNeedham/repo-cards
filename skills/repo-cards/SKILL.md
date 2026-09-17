@@ -26,6 +26,8 @@ repo-cards repos                # what is registered
 repo-cards register PATH        # add a repo (--name to override the deck name)
 repo-cards drift --repo NAME    # what changed since the deck was generated
 repo-cards stats                # due counts, box distribution, stickiest cards
+repo-cards flags                # cards flagged as suspect during review
+repo-cards flags --clear        # clear them, once an update has dealt with them
 repo-cards list --repo NAME     # every card with its box and due date
 repo-cards topics               # what topics a deck defines
 repo-cards brief --topic NAME   # read one area end to end; writes no state
@@ -255,27 +257,32 @@ and **changed files no card is anchored to**.
 
 Then, in order:
 
-1. **Verify before adding.** For every card the drift report flags hot, read the anchor as it is
+1. **Start with the cards the reader flagged.** `f` during review marks a card the reader did not
+   believe, and that is a stronger signal than any commit: they met the card, knew the area, and
+   said it was wrong. Verify each one, rewrite or retire it, and clear the flags with
+   `repo-cards flags --clear --repo <name>` once they are dealt with. A flag left standing after an
+   update is worse than none, because the next pass re-reads a card that is now fine.
+2. **Verify before adding.** For every card the drift report flags hot, read the anchor as it is
    *now* and decide: still true (leave it, id included), now wrong (rewrite the answer, keep the id
    so the box survives), or no longer a fact (retire it).
    **This step is the point of the update.** A deck that only grows is a deck that quietly starts
    lying.
-2. **Read the commit messages, not just the diff.** A commit like "Drop RabbitMQ, which nobody can
+3. **Read the commit messages, not just the diff.** A commit like "Drop RabbitMQ, which nobody can
    say what was wrong with" is a decision with reasoning, which is exactly what a card is for. A
    decision *reversed* is the highest-value card in an update, and the old card must be retired in
    the same pass.
-3. **Then consider new cards** from the uncovered-files list, against the same bar. Most changed
+4. **Then consider new cards** from the uncovered-files list, against the same bar. Most changed
    files warrant no card.
-4. **Fix the routes.** `drift` reports two things beside the anchors: cards whose `look` route
+5. **Fix the routes.** `drift` reports two things beside the anchors: cards whose `look` route
    changed, where the fact is probably intact but the directions moved, and **paths that no longer
    exist**, which are defects and should be repaired in every pass.
-5. **Fix the topics.** A retired card leaves a dangling id, which `repo-cards topics` flags; a new
+6. **Fix the topics.** A retired card leaves a dangling id, which `repo-cards topics` flags; a new
    card usually belongs in an existing topic, and a genuinely new feature area may want its own.
-6. **Stamp what changed.** A rewritten card gets `updated: <today>`; a new one gets
+7. **Stamp what changed.** A rewritten card gets `updated: <today>`; a new one gets
    `added: <today>`. That is the only record of recency, since the deck is not in git, and it is
    what floats new material to the front of a session.
-7. Bump `last_update_sha` and `last_update_date`.
-8. Re-validate and report: verified, rewritten, retired, added, topics touched, one line of
+8. Bump `last_update_sha` and `last_update_date`.
+9. Re-validate and report: verified, rewritten, retired, added, topics touched, one line of
    reasoning each. Short enough to read in a minute.
 
 `drift` decides this for you rather than leaving it to judgement: past roughly 60 commits, or once
@@ -312,6 +319,12 @@ either.
 Run bare in a terminal, `repo-cards` opens a picker: choose which decks to mix, and drill into any
 of them with `→` to pick topics. Both lists scroll, with paging and `home`/`end`. In the session, `←`/`→` move between cards (there is no skip),
 `enter` reveals, `y`/`n` grade. File paths are clickable where the terminal supports it.
+
+**`f` flags a card as suspect**, in either mode, and grades nothing. It is the answer to "this card
+is wrong now", which is a different thing from "I could not remember this" and deserves a different
+response: a miss is a scheduling fact, a flag is a defect in the deck. Flags are the first section
+of `repo-cards drift` and the first step of an update, because a reader who knows the area and does
+not believe the card is a better signal than any diff.
 
 `brief` is the read-only counterpart, in deck or topic order rather than shuffled, for rebuilding a
 mental model rather than testing it. Suggest it when somebody says they have a meeting about an

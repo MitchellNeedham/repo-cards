@@ -253,8 +253,11 @@ def load_state(name: str) -> dict:
 
 def save_state(name: str, state: dict) -> None:
     # Only graded cards are persisted. Scheduling a card nobody has seen is the same as having
-    # no row for it, and 80 identical defaults make the file unreadable.
-    seen = {cid: cs for cid, cs in state.items() if cs.get("seen", 0) > 0}
+    # no row for it, and 80 identical defaults make the file unreadable. A flag is the
+    # exception: it is a note to the next update, and it can be raised on a card in learn
+    # mode that has never been graded at all.
+    seen = {cid: cs for cid, cs in state.items()
+            if cs.get("seen", 0) > 0 or cs.get("flagged")}
     p = state_file(name)
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps(seen, indent=2, sort_keys=True) + "\n")
@@ -732,8 +735,11 @@ def fit_width(lines: list[str], cols: int, *chrome: str, target: int = TARGET_WI
     Content first, terminal second: a box sized to the screen wastes the reader's eye on
     air, and one sized past the screen breaks every row.
     """
-    content = max((visible_len(ln) for ln in lines), default=0)
-    needed = max(content, max((visible_len(c) for c in chrome), default=0)) + 4
+    content = max((visible_len(ln) for ln in lines), default=0) + 4
+    # Chrome is set into a border row, which costs three columns more than a content row:
+    # the stub dash, the space after it, and the space before the rule resumes. Sizing it
+    # like content is what clipped `q quit` off the end of the key hints.
+    needed = max(content, max((visible_len(c) for c in chrome), default=0) + 7)
     # The terminal is clamped last, on purpose: a box wider than the screen breaks every
     # row, so a cramped card on a 40-column terminal beats a broken one.
     return min(max(MIN_WIDTH, min(needed, target)), max(20, cols - 2))
@@ -1287,6 +1293,7 @@ def run_session(queue: list[tuple], mode: str = "test") -> int:
     kinds = {c["id"]: kind_of(c) for _, c, *_ in queue}
     revealed: set[int] = set()
     graded: dict[int, str] = {}
+    dirty: dict[str, dict] = {}
     i = 0
 
     save_prefs(mode=mode)
@@ -1302,7 +1309,13 @@ def run_session(queue: list[tuple], mode: str = "test") -> int:
 
             if key in ("q", "esc"):
                 break
-            if key == "l":
+            if key == "f":
+                # Not a grade. "I could not answer this" and "this card is no longer true"
+                # are different facts, and only the second one is worth an update's time.
+                if cs.pop("flagged", None) is None:
+                    cs["flagged"] = today().isoformat()
+                dirty[entry["name"]] = state
+            elif key == "l":
                 mode = "learn" if mode == "test" else "test"
                 save_prefs(mode=mode)
             elif key == "left":
@@ -1329,7 +1342,7 @@ def run_session(queue: list[tuple], mode: str = "test") -> int:
             sys.stdout.write(ALT_OFF)
             sys.stdout.flush()
 
-    return finish_session(queue, graded)
+    return finish_session(queue, graded, dirty)
 
 
 def draw_card(queue, i, kind, root, cs, revealed, grade, mode="test") -> None:
@@ -1374,16 +1387,19 @@ def draw_card(queue, i, kind, root, cs, revealed, grade, mode="test") -> None:
 
     nav = hint("←/→", "move", 117)
     quit_ = hint("q", "quit", 245)
+    flag = hint("f", "unflag" if cs.get("flagged") else "flag", 179)
     if mode == "learn":
-        parts = [nav, hint("l", "test", 214), quit_]
+        parts = [nav, hint("l", "test", 214), flag, quit_]
     elif not revealed:
-        parts = [nav, hint("enter", "reveal", 109), hint("l", "learn", 214), quit_]
+        parts = [nav, hint("enter", "reveal", 109), hint("l", "learn", 214), flag, quit_]
     else:
         parts = [nav, hint("y", "got it", 114), hint("n", "missed", 203),
-                 hint("l", "learn", 214), quit_]
+                 hint("l", "learn", 214), flag, quit_]
     keys = f" {C['dim']}·{C['reset']} ".join(parts)
     mark = {"y": f"{sgr(114)}✓ got it{C['reset']}",
             "n": f"{sgr(203)}✗ missed{C['reset']}"}.get(grade, "")
+    if cs.get("flagged"):
+        mark = (mark + "  " if mark else "") + f"{sgr(179)}⚑ flagged{C['reset']}"
     foot = keys + (f"  {mark}" if mark else "")
 
     # Trim from the middle padding rather than the content if the card is taller than the
@@ -1437,8 +1453,9 @@ def hard_break(text: str, width: int) -> list[str]:
     return [text[i:i + width] for i in range(0, len(text), width)] or [""]
 
 
-def finish_session(queue, graded: dict[int, str]) -> int:
-    touched: dict[str, dict] = {}
+def finish_session(queue, graded: dict[int, str], dirty: dict[str, dict] | None = None) -> int:
+    # A deck with a flag raised but nothing graded still has to be written out.
+    touched: dict[str, dict] = dict(dirty or {})
     right = wrong = 0
     for i, grade in graded.items():
         entry, card, state, _deck, _churn = queue[i]
@@ -1457,14 +1474,20 @@ def finish_session(queue, graded: dict[int, str]) -> int:
     for name, state in touched.items():
         save_state(name, state)
 
+    flagged = {cid for _n, st in touched.items() for cid, cs in st.items() if cs.get("flagged")}
     total = right + wrong
-    if not total:
+    if not total and not flagged:
         print(f"{C['dim']}Nothing graded, nothing rescheduled.{C['reset']}")
         return 0
-    print(f"{C['bold']}{right} right, {wrong} missed{C['reset']}  {C['dim']}({round(100 * right / total)}%)"
-          f" of {len(queue)} shown{C['reset']}")
-    if wrong:
-        print(f"{C['dim']}Missed cards are back in box 1 and due tomorrow.{C['reset']}")
+    if total:
+        print(f"{C['bold']}{right} right, {wrong} missed{C['reset']}  {C['dim']}({round(100 * right / total)}%)"
+              f" of {len(queue)} shown{C['reset']}")
+        if wrong:
+            print(f"{C['dim']}Missed cards are back in box 1 and due tomorrow.{C['reset']}")
+    if flagged:
+        print(f"{sgr(179)}⚑{C['reset']} {len(flagged)} card(s) flagged as suspect. "
+              f"{C['dim']}They are the first thing{C['reset']} /repo-cards:update"
+              f"{C['dim']} looks at, and repo-cards flags lists them.{C['reset']}")
     stale = sorted({e["name"] for e, *_ in queue
                     if (d := deck_summary(e)) and d.get("behind")})
     if stale:
@@ -1589,7 +1612,7 @@ def drift_facts(entry: dict) -> dict:
     root = Path(entry["root"]).expanduser()
     f = {"name": entry["name"], "root": root, "sha": None, "cards": [], "head": "", "log": "",
          "changed": [], "hot": [], "cold": [], "routes": [], "dead": [], "uncovered": [],
-         "unknown_repo": [], "status": "", "regen": False}
+         "unknown_repo": [], "flagged": [], "status": "", "regen": False}
 
     def note_dead() -> None:
         """Paths a card points at that are not in the repo any more.
@@ -1617,6 +1640,12 @@ def drift_facts(entry: dict) -> dict:
     f["cards"] = cards
     f["sha"] = deck.get("last_update_sha")
     sha = f["sha"]
+
+    # Raised by hand during review, so it holds whatever the shas say: the reader met the
+    # card and did not believe it. git cannot produce this signal and neither can the deck.
+    state = load_state(entry["name"])
+    f["flagged"] = [(c, state[c["id"]]["flagged"]) for c in cards
+                    if state.get(c["id"], {}).get("flagged")]
 
     if not root.is_dir():
         f["status"] = "root missing"
@@ -1727,6 +1756,10 @@ def print_drift_detail(f: dict) -> None:
         if f.get("regen"):
             print(f"\n{C['yellow']}Drifted far enough that a regenerate is likely cheaper than "
                   f"verifying this card by card.{C['reset']}")
+    if f["flagged"]:
+        print(f"\n--- cards you flagged during review ({len(f['flagged'])}) : VERIFY THESE FIRST ---")
+        for c, when in f["flagged"]:
+            print(f"  {c['id']:<40} flagged {when}  {c.get('anchor', '')}")
     if f["hot"] or f["status"] == "behind":
         print(f"\n--- cards whose anchor changed ({len(f['hot'])}) : VERIFY THESE ---")
         print("\n".join(f"  {c['id']:<40} {c['anchor']}" for c in f["hot"]) or "  (none)")
@@ -1779,7 +1812,8 @@ def cmd_drift(args) -> int:
     colours = {"behind": C["yellow"], "linked moved": C["yellow"], "up to date": C["green"],
                "no deck": C["dim"]}
 
-    print(f"\n  {'repo':<20} {'commits':>8} {'verify':>7} {'routes':>7} {'dead':>5} {'new files':>10}   state")
+    print(f"\n  {'repo':<20} {'commits':>8} {'verify':>7} {'flagged':>8} {'routes':>7} "
+          f"{'dead':>5} {'new files':>10}   state")
     for f in sorted(facts, key=lambda x: (rank.get(x["status"], 9), -len(x["hot"]))):
         colour = colours.get(f["status"], C["red"])
         dead = f"{C['red']}{len(f['dead'])}{C['reset']}" if f["dead"] else "-"
@@ -1788,7 +1822,9 @@ def cmd_drift(args) -> int:
             cols = (str(n) if n else "-", str(len(f["hot"])), str(len(f["routes"])), str(len(f["uncovered"])))
         else:
             cols = ("-", "-", "-", "-")
-        print(f"  {f['name']:<20} {cols[0]:>8} {cols[1]:>7} {cols[2]:>7} {dead:>5} {cols[3]:>10}   {colour}{f['status']}{C['reset']}")
+        flags = f"{sgr(179)}{len(f['flagged'])}{C['reset']}" if f["flagged"] else "-"
+        print(f"  {f['name']:<20} {cols[0]:>8} {cols[1]:>7} {flags:>8} {cols[2]:>7} "
+              f"{dead:>5} {cols[3]:>10}   {colour}{f['status']}{C['reset']}")
 
     print()
     regen = [f for f in facts if f.get("regen")]
@@ -1804,7 +1840,12 @@ def cmd_drift(args) -> int:
     if ungenerated:
         print(f"  {len(ungenerated)} repo(s) registered with no deck: {', '.join(f['name'] for f in ungenerated)}")
         print(f"  {C['dim']}Generate one by running /repo-cards:generate from inside it.{C['reset']}")
-    if not behind and not linked and not ungenerated:
+    flagged = [f for f in facts if f["flagged"]]
+    if flagged:
+        n = sum(len(f["flagged"]) for f in flagged)
+        print(f"  {sgr(179)}{n} card(s) flagged during review{C['reset']} in "
+              f"{', '.join(f['name'] for f in flagged)}. {C['dim']}Detail: repo-cards flags{C['reset']}")
+    if not behind and not linked and not ungenerated and not flagged:
         print(f"  {C['green']}Every deck is current.{C['reset']}")
     print()
     return 0
@@ -1906,6 +1947,54 @@ def cmd_brief(args) -> int:
     return 0
 
 
+def cmd_flags(args) -> int:
+    """Cards flagged as suspect during review, and the way to clear them.
+
+    Clearing lives here rather than in the skill because state.json is the one file an
+    update must never hand-edit: a flag sits beside the review box, and a careless rewrite
+    of that file costs every card's history.
+    """
+    width = min(shutil.get_terminal_size((90, 24)).columns, 96)
+    total = cleared = 0
+    for entry in load_registry():
+        if args.repo and entry["name"] != args.repo:
+            continue
+        loaded = load_deck(entry, quiet=True)
+        if loaded is None:
+            continue
+        _deck, cards = loaded
+        state = load_state(entry["name"])
+        rows = [c for c in cards if state.get(c["id"], {}).get("flagged")
+                and (not args.path or c["id"] == args.path)]
+        if not rows:
+            continue
+        if args.clear:
+            for c in rows:
+                state[c["id"]].pop("flagged", None)
+                cleared += 1
+            save_state(entry["name"], state)
+            continue
+        print(f"\n{C['bold']}{entry['name']}{C['reset']}")
+        for c in rows:
+            cs = state[c["id"]]
+            print(f"  {sgr(179)}⚑{C['reset']} {c['id']:<38} {C['dim']}flagged {cs['flagged']} · "
+                  f"box {cs.get('box', 1)} · {c.get('anchor', '')}{C['reset']}")
+            print(wrap(str(c.get("q", "")), width, "      ", style=C["dim"]))
+        total += len(rows)
+
+    if args.clear:
+        print(f"{C['green']}cleared {cleared} flag(s){C['reset']}" if cleared
+              else f"{C['dim']}nothing to clear{C['reset']}")
+        return 0
+    if not total:
+        print(f"{C['green']}No cards flagged.{C['reset']} "
+              f"{C['dim']}Press f on a card you do not believe during review.{C['reset']}")
+        return 0
+    print(f"\n{C['dim']}{total} flagged. Ask Claude for{C['reset']} /repo-cards:update"
+          f"{C['dim']}, then: repo-cards flags --clear{C['reset']}\n")
+    return 0
+
+
 # --- registry management -----------------------------------------------------
 
 def cmd_register(args) -> int:
@@ -1974,8 +2063,9 @@ def main() -> int:
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("command", nargs="?", default="review",
                    choices=["review", "test", "learn", "brief", "topics", "stats", "list",
-                            "drift", "register", "forget", "repos", "home"])
-    p.add_argument("path", nargs="?", help="for `register`: repo root. for `forget`: the name")
+                            "drift", "flags", "register", "forget", "repos", "home"])
+    p.add_argument("path", nargs="?",
+                   help="for `register`: repo root. for `forget`: the name. for `flags`: a card id")
     p.add_argument("--name", help="for `register`: deck name (default: directory name)")
     p.add_argument("--repo", help="limit to one registered repo")
     p.add_argument("--tag", help="limit to these tags (one name, or a comma-separated list)")
@@ -1989,6 +2079,7 @@ def main() -> int:
     p.add_argument("--no-pick", action="store_true",
                    help="skip the interactive picker and review everything due")
     p.add_argument("--full", action="store_true", help="for `drift`: full detail for every repo, not a summary")
+    p.add_argument("--clear", action="store_true", help="for `flags`: clear them, once an update has dealt with them")
     p.add_argument("--priority", type=int, choices=[1, 2, 3],
                    help="only cards at this priority (1 foundational, 2 core, 3 detail)")
     args = p.parse_args()
@@ -1998,7 +2089,7 @@ def main() -> int:
     args.mode = args.mode or load_prefs().get("mode", "test")
     return {
         "review": cmd_review, "brief": cmd_brief, "topics": cmd_topics,
-        "stats": cmd_stats, "list": cmd_list, "drift": cmd_drift,
+        "stats": cmd_stats, "list": cmd_list, "drift": cmd_drift, "flags": cmd_flags,
         "register": cmd_register, "forget": cmd_forget, "repos": cmd_repos, "home": cmd_home,
     }[args.command](args)
 
