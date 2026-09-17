@@ -23,8 +23,10 @@ Then:
 4. Propose four to eight topics in the same pass, including an `orientation` topic.
 5. Set `repo`, `description`, `last_update_sha` (current short HEAD) and `last_update_date`. Do not
    put the repo root in the deck; that lives in the registry.
-6. Validate before reporting: the YAML parses, no duplicate ids, every card has `id`, `q`, `a`,
-   `anchor` and `tags`, and every topic id resolves to a real card.
+6. Validate with `repo-cards check --repo <name>` and fix what it reports. Errors are defects: a
+   route that 404s, a duplicate id, a topic naming a card that does not exist. Warnings are the
+   deck's own bar, so fix the ones that are right and name the ones you are keeping. Do not report
+   a deck as finished while `check` still exits 1.
 7. Report the card count, the tag breakdown, the topics, and anything deliberately left out.
 
 If a deck already exists for this repo, stop and say so: `/repo-cards:update` is the command that

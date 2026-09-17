@@ -17,6 +17,7 @@ Content and scheduling state are separate files: regenerating a deck never costs
   repo-cards stats                 deck health and box distribution
   repo-cards drift                 what changed since a deck was last updated
   repo-cards catchup               what moved since you last reviewed
+  repo-cards check                 validate a deck against the rules it is written to
   repo-cards register PATH         add a repo
   repo-cards home                  print where everything lives
 """
@@ -1932,6 +1933,157 @@ def cmd_drift(args) -> int:
     return 0
 
 
+# --- check: the deck's own rules, enforced rather than described -------------
+#
+# Everything here was already written down in the skill as instructions to follow while
+# writing a deck. Instructions followed by a model are followed unevenly, and the failures
+# are quiet: a route that 404s, a question that can be answered yes or no, an anchor with no
+# symbol that drags every card on that file into every update. Checking them costs
+# milliseconds and turns "please be careful" into "the deck is wrong, here is where".
+
+YESNO = re.compile(r"^(is|are|was|were|does|do|did|can|could|should|shall|will|would|has|have|had)\b", re.I)
+SENTENCE_END = re.compile(r"[.!?](?:\s|$)")
+KEBAB = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+#: An anchor into prose names the whole document, and rightly: a decision record has no
+#: symbols to name, so demanding one would teach the writer to invent them.
+PROSE = (".md", ".rst", ".txt", ".adoc")
+MAX_SENTENCES = 4
+
+
+def check_deck(entry: dict, deck: dict, cards: list[dict]) -> list[tuple[str, str, str]]:
+    """(level, scope, message) for everything mechanically wrong with one deck.
+
+    Errors are things that are broken: a route nobody can follow, an id two cards share, a
+    topic pointing at a card that is gone. Warnings are the deck's own bar, which is a matter
+    of judgement and so is reported rather than enforced.
+    """
+    out: list[tuple[str, str, str]] = []
+    root = Path(entry["root"]).expanduser()
+    err = lambda scope, msg: out.append(("error", scope, msg))
+    warn = lambda scope, msg: out.append(("warn", scope, msg))
+
+    for field in ("last_update_sha", "last_update_date"):
+        if not deck.get(field):
+            warn("deck", f"no `{field}`, so drift has no baseline to measure from")
+
+    seen: dict[str, int] = {}
+    for n, card in enumerate(cards, 1):
+        cid = str(card.get("id") or "")
+        scope = cid or f"card #{n}"
+        if not cid:
+            err(scope, "no `id`, so it can never hold a review box")
+        elif cid in seen:
+            err(scope, f"duplicate id, first used by card #{seen[cid]}. One of them owns the state")
+        else:
+            seen[cid] = n
+        if cid and not KEBAB.match(cid):
+            warn(scope, "id is not a kebab-case slug, which is what state.json keys on")
+
+        q, a = str(card.get("q") or "").strip(), str(card.get("a") or "").strip()
+        if not q:
+            err(scope, "no `q`")
+        if not a:
+            err(scope, "no `a`")
+        if not card.get("tags"):
+            err(scope, "no `tags`, so --tag can never reach it")
+        if card.get("priority") is not None and card["priority"] not in PRIORITY_WEIGHT:
+            err(scope, f"priority {card['priority']!r} is not 1, 2 or 3")
+
+        if q and YESNO.match(q):
+            warn(scope, f"question can be answered yes or no, so it tests recognition: {q[:60]!r}")
+        if a and len(SENTENCE_END.findall(a)) > MAX_SENTENCES:
+            warn(scope, f"answer runs to more than {MAX_SENTENCES} sentences, so it is two cards or a document")
+
+        kind = str(card.get("kind") or "recall").lower()
+        if kind not in ("recall", "cloze", "locate", "order"):
+            err(scope, f"unknown kind {kind!r}")
+        if kind == "cloze" and not CLOZE.search(a):
+            err(scope, "kind is cloze but the answer marks no {{blanks}}")
+        if kind == "order" and len(card.get("sequence") or []) < 2:
+            err(scope, "kind is order but there is no `sequence` of at least two steps")
+        if kind == "locate" and len(look_entries(card)) < 2:
+            err(scope, "kind is locate but the routes, which are the answer, are thin")
+
+        anchor = str(card.get("anchor") or "")
+        if not anchor:
+            err(scope, "no `anchor`, so drift and churn cannot see it at all")
+        elif "#" not in anchor and not anchor.lower().endswith(PROSE):
+            warn(scope, f"anchor names no #symbol, so any commit to {anchor} flags this card")
+
+        routes = look_entries(card)
+        if len(routes) < 2:
+            warn(scope, "fewer than two `look` routes, so there is no route to follow, only a location")
+        dirs = {(p.split("#")[0].rsplit("/", 1)[0] if "/" in p.split("#")[0] else "") for p, _ in routes}
+        if len(routes) >= 2 and len(dirs) == 1:
+            warn(scope, "every route is in one directory; a decision, an implementation and a test teach more")
+        for path, what in routes:
+            if not what:
+                warn(scope, f"route {path} says where but not what is there")
+
+        for ref in all_refs(card):
+            other, rel = resolve_ref(ref, root)
+            if other is None:
+                err(scope, f"names a repo that is not registered: {ref}")
+            elif not (other / rel).exists():
+                err(scope, f"path does not exist: {ref}")
+
+        stamp = str(card.get("verified") or "")
+        if stamp and root.is_dir() and not sha_date(root, stamp):
+            warn(scope, f"`verified: {stamp}` names no commit in this repo, so it is being ignored")
+
+    for name, topic in (deck.get("topics") or {}).items():
+        wanted = topic.get("cards") or []
+        if not wanted:
+            warn(f"topic {name}", "no cards")
+        for cid in wanted:
+            if cid not in seen:
+                err(f"topic {name}", f"names a card that is not in the deck: {cid}")
+        if not topic.get("description"):
+            warn(f"topic {name}", "no description, so the picker and `topics` show a blank line")
+        if notes := topic.get("notes"):
+            if not (deck_dir(entry["name"]) / notes).exists():
+                err(f"topic {name}", f"notes file does not exist: {notes}")
+    return out
+
+
+def cmd_check(args) -> int:
+    """Validate decks against the rules the skill describes. Exit 1 if anything is broken."""
+    errors = warnings = decks = 0
+    for entry in load_registry():
+        if args.repo and entry["name"] != args.repo:
+            continue
+        if not deck_path(entry["name"]).exists():
+            if args.repo:
+                print(f"{C['yellow']}no deck for {entry['name']}{C['reset']}")
+            continue
+        loaded = load_deck(entry, quiet=True)
+        if loaded is None:
+            print(f"{C['red']}{entry['name']}: deck does not parse{C['reset']}")
+            errors += 1
+            continue
+        deck, cards = loaded
+        decks += 1
+        found = check_deck(entry, deck, cards)
+        errors += sum(1 for lvl, _, _ in found if lvl == "error")
+        warnings += sum(1 for lvl, _, _ in found if lvl == "warn")
+        head = f"{C['bold']}{entry['name']}{C['reset']}  {C['dim']}{len(cards)} cards{C['reset']}"
+        if not found:
+            print(f"\n{head}  {C['green']}clean{C['reset']}")
+            continue
+        print(f"\n{head}")
+        for level, scope, msg in found:
+            if level == "warn" and args.errors_only:
+                continue
+            tag = f"{C['red']}error{C['reset']}" if level == "error" else f"{C['yellow']}warn {C['reset']}"
+            print(f"  {tag}  {scope:<38} {msg}")
+
+    if not decks and not errors:
+        print("No decks to check. Generate one with /repo-cards:generate")
+        return 0
+    print(f"\n{errors} error(s), {warnings} warning(s) across {decks} deck(s)\n")
+    return 1 if errors or (warnings and args.strict) else 0
+
+
 # --- catchup: what moved while you were away ---------------------------------
 
 def commits_since(root: Path, since: str) -> list[tuple[str, int, str, set[str]]]:
@@ -2258,7 +2410,8 @@ def main() -> int:
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("command", nargs="?", default="review",
                    choices=["review", "test", "learn", "brief", "topics", "stats", "list",
-                            "drift", "flags", "catchup", "register", "forget", "repos", "home"])
+                            "drift", "flags", "catchup", "check", "register", "forget",
+                            "repos", "home"])
     p.add_argument("path", nargs="?",
                    help="for `register`: repo root. for `forget`: the name. for `flags`: a card id")
     p.add_argument("--name", help="for `register`: deck name (default: directory name)")
@@ -2276,6 +2429,8 @@ def main() -> int:
     p.add_argument("--full", action="store_true", help="for `drift`: full detail for every repo, not a summary")
     p.add_argument("--clear", action="store_true", help="for `flags`: clear them, once an update has dealt with them")
     p.add_argument("--since", help="for `catchup`: look back to this date instead of your last review")
+    p.add_argument("--strict", action="store_true", help="for `check`: fail on warnings as well as errors")
+    p.add_argument("--errors-only", action="store_true", help="for `check`: print errors, not warnings")
     p.add_argument("--priority", type=int, choices=[1, 2, 3],
                    help="only cards at this priority (1 foundational, 2 core, 3 detail)")
     args = p.parse_args()
@@ -2286,7 +2441,7 @@ def main() -> int:
     return {
         "review": cmd_review, "brief": cmd_brief, "topics": cmd_topics,
         "stats": cmd_stats, "list": cmd_list, "drift": cmd_drift, "flags": cmd_flags,
-        "catchup": cmd_catchup,
+        "catchup": cmd_catchup, "check": cmd_check,
         "register": cmd_register, "forget": cmd_forget, "repos": cmd_repos, "home": cmd_home,
     }[args.command](args)
 

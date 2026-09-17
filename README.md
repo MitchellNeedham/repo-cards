@@ -174,6 +174,7 @@ $ repo-cards drift
 | `--repo N` `--tag a,b` `--grep RE` `--topic T` `--priority 1` | narrow the session |
 | `--limit N` `--new` `--all` `--no-pick` | cap it, unseen only, ignore due dates, skip the picker |
 | `topics` `stats` `list` `drift` | what exists, deck health, every card, what changed |
+| `check` `--strict` | validate a deck against the rules it is written to |
 | `catchup` `--since D` | what moved since you last reviewed, read-only |
 | `flags` `flags --clear` | cards you marked suspect during review, and clearing them |
 | `register PATH` `forget NAME` `repos` `home` | the registry, and where things live |
@@ -206,6 +207,10 @@ everywhere, and `repo-cards home` prints what it resolved.
 - **Each card remembers the commit it was checked against**, so verifying one is not undone by the
   next commit to the same file. Without it, the cards on the busiest files are flagged every pass
   and the update becomes a thing you stop running.
+- **The deck's rules are checked, not just described.** `repo-cards check` enforces what the skill
+  asks for, so a generated deck is validated by a program rather than by the care of whoever
+  generated it. Broken routes, duplicate ids, yes/no questions and anchors with no symbol are all
+  found in milliseconds.
 - **Review feeds the deck, not just the schedule.** A flag raised during review and a card missed
   three times running both land in `drift`, so an update fixes what the reading is telling you as
   well as what the commits are.

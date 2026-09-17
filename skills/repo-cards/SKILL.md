@@ -26,6 +26,7 @@ repo-cards repos                # what is registered
 repo-cards register PATH        # add a repo (--name to override the deck name)
 repo-cards drift --repo NAME    # what changed since the deck was generated
 repo-cards catchup --repo NAME  # what moved since you last reviewed it. Read-only
+repo-cards check --repo NAME    # validate a deck. Exit 1 if anything is broken
 repo-cards stats                # due counts, box distribution, stickiest cards
 repo-cards flags                # cards flagged as suspect during review
 repo-cards flags --clear        # clear them, once an update has dealt with them
@@ -254,8 +255,13 @@ feature spans tags or when the order matters.
    the deck: that is machine-specific and lives in the registry.
 6. **Propose topics** in the same pass, per the section above. They are cheap while the whole deck
    is in front of you and tedious to retrofit.
-7. Validate before finishing: parse the YAML, check for duplicate ids, check every card has `id`,
-   `q`, `a`, `anchor`, `tags`, and check every topic id resolves to a real card.
+7. **Validate with `repo-cards check --repo <name>` and fix what it reports.** It enforces what
+   this file describes: duplicate ids, missing fields, topic ids that resolve to nothing, routes
+   and notes files that do not exist, cross-repo refs naming an unregistered repo, cloze cards with
+   no blanks. It also warns where the deck misses its own bar: anchors with no `#symbol`, questions
+   answerable yes or no, answers longer than four sentences, cards with fewer than two routes.
+   Errors are defects and must be fixed. Warnings are judgement, so fix the ones that are right and
+   say why you are keeping the rest.
 8. Report the card count, the tag breakdown and the topics, and name anything deliberately left
    out.
 
@@ -299,8 +305,8 @@ Then, in order:
    also gets `verified: <short HEAD>`**, whether or not you changed it, so the next update measures
    it from here instead of from the deck's baseline.
 9. Bump `last_update_sha` and `last_update_date`.
-10. Re-validate and report: verified, rewritten, retired, added, topics touched, one line of
-   reasoning each. Short enough to read in a minute.
+10. Re-validate with `repo-cards check --repo <name>` and report: verified, rewritten, retired,
+   added, topics touched, one line of reasoning each. Short enough to read in a minute.
 
 `drift` decides this for you rather than leaving it to judgement: past roughly 60 commits, or once
 a quarter of the cards point at paths that no longer exist, it reports that the deck has drifted far

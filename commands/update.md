@@ -51,8 +51,8 @@ Then, in this order:
    card usually belongs in an existing topic; a genuinely new feature area may want its own.
 7. Bump `last_update_sha` to the current short HEAD and `last_update_date` to today. Cards you did
    not reach keep whatever `verified` stamp they had, which is what makes a partial pass honest.
-8. Re-validate as for generation, then report: verified, rewritten, retired, added, topics touched,
-   with one line of reasoning each. Short enough to read in a minute.
+8. Re-validate with `repo-cards check --repo <name>`, then report: verified, rewritten, retired,
+   added, topics touched, with one line of reasoning each. Short enough to read in a minute.
 
 Never edit or regenerate `state.json`. A card that keeps its id keeps its review box; if a card's
 meaning has changed enough that its history would mislead, give it a new id instead.
