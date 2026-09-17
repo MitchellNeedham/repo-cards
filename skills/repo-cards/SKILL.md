@@ -104,6 +104,7 @@ sessions rather than demanding to be finished.
   tags: [outbox, invariant]           # lowercase; --tag filters on these
   priority: 1                         # 1 foundational, 2 core (default, omit it), 3 detail
   anchor: src/billing/outbox.py#enqueue   # where the fact is DEFINED. One path, drift-tracked
+  verified: 4f2a91c                      # the commit this card was last checked against
   look:                               # how you would go and check. Path: what you would find
     src/billing/outbox.py#enqueue: the empty payload, and the comment arguing it
     src/billing/sender.py#render: where the bytes are actually built
@@ -176,6 +177,14 @@ Prefer *why*, *what breaks if not*, and *what was rejected* over *what*.
 **The answer is one to four sentences.** If it needs more, it is two cards or it is a document.
 Where the repo phrases something better than you would, quote the repo: its wording is what the
 reader will meet again in a docstring.
+
+**`verified` is what keeps an update from re-reading the same cards forever.** It names the commit
+the card was last checked against, and drift measures that card from there rather than from the
+deck's baseline. Without it, a card anchored on a file that moves every week is flagged in every
+single pass, the pass grows tedious, and an update that cries wolf stops being run. Stamp it on
+every card you *read and kept*, not only the ones you rewrote: checking and finding nothing wrong
+is the work that the stamp records. A stamp naming a commit the repo has never heard of, after a
+rebase, falls back to the deck's baseline rather than clearing the card.
 
 **The anchor is what makes the deck maintainable.** One repo-relative path per card, naming where
 the fact is *defined*, not everywhere it is mentioned. An anchor to a file that changes constantly
@@ -283,9 +292,11 @@ Then, in order:
    exist**, which are defects and should be repaired in every pass.
 7. **Fix the topics.** A retired card leaves a dangling id, which `repo-cards topics` flags; a new
    card usually belongs in an existing topic, and a genuinely new feature area may want its own.
-8. **Stamp what changed.** A rewritten card gets `updated: <today>`; a new one gets
-   `added: <today>`. That is the only record of recency, since the deck is not in git, and it is
-   what floats new material to the front of a session.
+8. **Stamp what changed, and what you checked.** A rewritten card gets `updated: <today>`; a new
+   one gets `added: <today>`. That is the only record of recency, since the deck is not in git, and
+   it is what floats new material to the front of a session. **Every card you read in this pass
+   also gets `verified: <short HEAD>`**, whether or not you changed it, so the next update measures
+   it from here instead of from the deck's baseline.
 9. Bump `last_update_sha` and `last_update_date`.
 10. Re-validate and report: verified, rewritten, retired, added, topics touched, one line of
    reasoning each. Short enough to read in a minute.

@@ -1589,6 +1589,34 @@ def since_arg(date: str) -> str:
     return f"{date} 00:00:00"
 
 
+_SHA_DATE: dict[tuple[str, str], str] = {}
+
+
+def sha_date(root: Path, sha: str) -> str:
+    """A commit's date as YYYY-MM-DD, or "" if this repo has never heard of it.
+
+    Empty is the answer that matters: a `verified` stamp naming a commit that no longer
+    exists, after a rebase or a force push, must fall back to the deck's baseline rather
+    than silently clear the card.
+    """
+    key = (str(root), sha)
+    if key not in _SHA_DATE:
+        _SHA_DATE[key] = git(root, "show", "-s", "--format=%cs", f"{sha}^{{commit}}")
+    return _SHA_DATE[key]
+
+
+_CHANGED: dict[tuple[str, str], set[str]] = {}
+
+
+def changed_between(root: Path, base: str) -> set[str]:
+    """Files changed between a commit and HEAD. Cached: a deck has few distinct baselines
+    however many cards it carries."""
+    key = (str(root), base)
+    if key not in _CHANGED:
+        _CHANGED[key] = {x for x in git(root, "diff", "--name-only", f"{base}..HEAD").split("\n") if x}
+    return _CHANGED[key]
+
+
 _CHANGED_SINCE: dict[tuple[str, str], set[str]] = {}
 
 
@@ -1618,7 +1646,8 @@ def drift_facts(entry: dict) -> dict:
     root = Path(entry["root"]).expanduser()
     f = {"name": entry["name"], "root": root, "sha": None, "cards": [], "head": "", "log": "",
          "changed": [], "hot": [], "cold": [], "routes": [], "dead": [], "uncovered": [],
-         "unknown_repo": [], "flagged": [], "sticky": [], "status": "", "regen": False}
+         "unknown_repo": [], "flagged": [], "sticky": [], "verified_skip": 0,
+         "status": "", "regen": False}
 
     def note_dead() -> None:
         """Paths a card points at that are not in the repo any more.
@@ -1679,10 +1708,20 @@ def drift_facts(entry: dict) -> dict:
     # An anchor carrying #symbol is narrowed further: one commit to a 700-line module
     # should not flag every card drawn from it, or the update drowns in false positives.
     changed_set, diff_cache = set(f["changed"]), {}
-    since = str(deck.get("last_update_date") or "")
+    deck_since = str(deck.get("last_update_date") or "")
 
-    def foreign_changed(repo: str) -> set[str] | None:
-        """What has moved in another registered repo since this deck was written."""
+    def baseline(card: dict) -> str:
+        """What this card was last checked against.
+
+        A card verified during a later pass has a narrower window than the deck's own, which
+        is the whole point: without it, a card anchored on a file that moves every week comes
+        up in every single update, and an update that cries wolf stops being run.
+        """
+        stamp = str(card.get("verified") or "")
+        return stamp if stamp and sha_date(root, stamp) else sha
+
+    def foreign_changed(repo: str, since: str) -> set[str] | None:
+        """What has moved in another registered repo since this card was checked."""
         other = registry_roots().get(repo)
         if other is None or not other.is_dir() or not since:
             return None
@@ -1693,38 +1732,53 @@ def drift_facts(entry: dict) -> dict:
         path, _, symbol = rest.partition("#")
         if not path:
             continue
-        if repo is None or repo == f["name"]:
-            changed = changed_set
-        elif (changed := foreign_changed(repo)) is None:
-            continue
+        base = baseline(c)
+        local = repo is None or repo == f["name"]
+        if local:
+            changed = changed_between(root, base) if base != sha else changed_set
+        else:
+            # A sha here means nothing in another repo, so the date it landed is the
+            # baseline. Coarser, and coarse in the safe direction.
+            since = sha_date(root, base) if base != sha else deck_since
+            if (changed := foreign_changed(repo, since or deck_since)) is None:
+                continue
         if not (path in changed or any(x.startswith(path.rstrip("/") + "/") for x in changed)):
+            if local and base != sha and path in changed_set:
+                f["verified_skip"] += 1
             continue
         if not symbol:
             f["hot"].append(c)
             continue
-        if (repo, path) not in diff_cache:
-            if repo is None or repo == f["name"]:
-                patch = git(root, "diff", "-U5", f"{sha}..HEAD", "--", path)
+        if (repo, path, base) not in diff_cache:
+            if local:
+                patch = git(root, "diff", "-U5", f"{base}..HEAD", "--", path)
             else:
-                patch = git(registry_roots()[repo], "log", f"--since={since_arg(since)}",
+                patch = git(registry_roots()[repo], "log", f"--since={since_arg(since or deck_since)}",
                             "--format=", "-U5", "-p", "--", path)
-            diff_cache[(repo, path)] = patch
+            diff_cache[(repo, path, base)] = patch
         # Hunk headers carry the enclosing function name, so a symbol absent from the
         # whole diff was very likely not touched.
-        (f["hot"] if symbol in diff_cache[(repo, path)] else f["cold"]).append(c)
+        if symbol in diff_cache[(repo, path, base)]:
+            f["hot"].append(c)
+        else:
+            f["cold"].append(c)
+            if local and base != sha and path in changed_set:
+                f["verified_skip"] += 1
 
     hot_ids = {c["id"] for c in f["hot"]}
     for c in cards:
         if c["id"] in hot_ids:
             continue
+        base = baseline(c)
         touched = []
         for pth, _ in look_entries(c):
             repo, rest = split_ref(pth)
-            local = rest.split("#")[0]
+            path = rest.split("#")[0]
             if repo is None or repo == f["name"]:
-                hit = local in changed_set
+                hit = path in (changed_between(root, base) if base != sha else changed_set)
             else:
-                hit = local in (foreign_changed(repo) or set())
+                hit = path in (foreign_changed(repo, sha_date(root, base) if base != sha
+                                               else deck_since) or set())
             if hit:
                 touched.append(pth)
         if touched:
@@ -1781,6 +1835,9 @@ def print_drift_detail(f: dict) -> None:
     if f["hot"] or f["status"] == "behind":
         print(f"\n--- cards whose anchor changed ({len(f['hot'])}) : VERIFY THESE ---")
         print("\n".join(f"  {c['id']:<40} {c['anchor']}" for c in f["hot"]) or "  (none)")
+    if f["verified_skip"]:
+        print(f"\n  {C['dim']}{f['verified_skip']} card(s) not listed: their anchor moved, but "
+              f"they carry a `verified` sha from after that commit.{C['reset']}")
     if f["cold"]:
         print(f"\n--- file changed but the anchored symbol was not touched ({len(f['cold'])}) : likely fine ---")
         print("\n".join(f"  {c['id']:<40} {c['anchor']}" for c in f["cold"]))

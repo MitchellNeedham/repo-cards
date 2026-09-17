@@ -37,7 +37,9 @@ Then, in this order:
    quality rather than its currency, so do not skip it because git had nothing to say.
 3. **Verify before adding.** For every card the report flags hot, read the anchor as it is *now* and
    decide: still true (leave it, id included), now wrong (rewrite the answer, keep the id so the
-   review box survives), or no longer a fact (retire it).
+   review box survives), or no longer a fact (retire it). **Stamp every card you read with
+   `verified: <short HEAD>`**, kept or rewritten, so the next pass measures it from here rather
+   than from the deck's baseline and stops re-reading the same hot files.
    **This is the point of the command.** A deck that only grows is a deck that quietly starts lying,
    and a stale card is worse than a missing one because it gets acted on confidently.
 4. **Read the commit messages, not just the diff.** A commit that reverses an earlier decision is
@@ -47,7 +49,8 @@ Then, in this order:
    files warrant no card.
 6. **Fix the topics.** A retired card leaves a dangling id, which `repo-cards topics` flags. A new
    card usually belongs in an existing topic; a genuinely new feature area may want its own.
-7. Bump `last_update_sha` to the current short HEAD and `last_update_date` to today.
+7. Bump `last_update_sha` to the current short HEAD and `last_update_date` to today. Cards you did
+   not reach keep whatever `verified` stamp they had, which is what makes a partial pass honest.
 8. Re-validate as for generation, then report: verified, rewritten, retired, added, topics touched,
    with one line of reasoning each. Short enough to read in a minute.
 

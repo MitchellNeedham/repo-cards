@@ -180,6 +180,9 @@ everywhere, and `repo-cards home` prints what it resolved.
   worse than a missing one, because you act on it confidently. A deck that only grows starts lying.
 - **Anchors name a symbol, not just a file**, so one commit to a large module does not flag every
   card drawn from it. On a real 17-commit window: 16 cards to verify instead of 28.
+- **Each card remembers the commit it was checked against**, so verifying one is not undone by the
+  next commit to the same file. Without it, the cards on the busiest files are flagged every pass
+  and the update becomes a thing you stop running.
 - **Review feeds the deck, not just the schedule.** A flag raised during review and a card missed
   three times running both land in `drift`, so an update fixes what the reading is telling you as
   well as what the commits are.
