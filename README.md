@@ -133,6 +133,28 @@ cannot: a card that was wrong the day it was written.
 a sequence, and `locate` asks *where you would look*, treating the routes as the answer. A recall
 card with good routes is asked that way about one time in six.
 
+**Those three can be typed and marked** with `t`, because their answers are short and exact:
+
+```
+╭─ billing · fill the blanks ──────────────── 4/22  box 2  ★★★ ─╮
+│   The ledger is ▁▁▁▁▁▁▁▁▁▁▁▁▁; the projection is written      │
+│   ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁.                                         │
+│                                                               │
+│   2? in one transaction█                                      │
+├───────────────────────────────────────────────────────────────┤
+│   ✓ authoritative                                             │
+│   ✗ in the same transaction                                   │
+│       you said: in one transaction                            │
+│                                                               │
+│   marked from what you typed · y or n overrides               │
+╰─ ←/→ move · y got it · n missed · l learn · f flag · q quit ──╯
+```
+
+A typo passes, a different word does not, and the mark moves the box like any other grade.
+Prose answers are never marked this way: on a card whose answer is a *why*, "blank to save space"
+and "blank because it is a prompt, not a snapshot" look alike to any string comparison, and one of
+them is the defect the card exists to prevent.
+
 **Topics** are curated reading orders, plus `last-week` and `last-month`, which are built from git
 history: the cards whose anchor a commit touched in that window, newest first. Those two need no
 maintenance and are the fastest way back in after time away. Work that landed through a merge is

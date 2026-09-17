@@ -178,6 +178,12 @@ A plain recall card carrying two or more routes is also asked as `locate` about 
 the variety costs no extra authoring. Reach for an explicit `kind:` when the shape genuinely fits:
 `cloze` for a rule with two or three load-bearing words in it, `order` for a pipeline or lifecycle.
 
+**These three can be typed and marked**, with `t` during a test session, and the mark moves the box
+like any other grade. That is worth knowing while writing them, because it is what the blanks are
+for: choose `{{load-bearing}}` words that are wrong to get wrong, not adjectives. A typo passes and
+a different word does not, every blank has to be right, and `locate` wants every route named. The
+mark is a fact about the words, so `y` or `n` overrides it.
+
 ### look
 
 `anchor` is one path, the place the fact is *defined*; drift tracks it precisely and churn is

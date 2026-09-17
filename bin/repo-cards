@@ -935,6 +935,50 @@ def read_line(label: str, draw=None) -> str:
 CLOZE = re.compile(r"\{\{(.+?)\}\}", re.S)
 LOCATE_CHANCE = 6      # 1 in N recall cards with routes are asked as locate instead
 
+# --- checking a typed answer -------------------------------------------------
+#
+# Deliberately stdlib, and deliberately lexical. `rapidfuzz` matches better and `model2vec`
+# matches meaning in thirty megabytes without an LLM, and neither is reached for, because
+# what is checked here is short and exact: a blanked word, a step in a sequence, a path.
+#
+# Prose is never checked, only measured as a hint, because similarity is not correctness on
+# a card whose answer is a *why*. "The row is blank to save space" and "the row is blank
+# because it is a prompt, not a snapshot" read alike to any of these, and one of them is the
+# defect the card exists to prevent. Swapping in something better means changing
+# `close_enough` and nothing above it.
+
+PUNCT = re.compile(r"[^\w\s]")
+CLOSE_ENOUGH = 0.85     # a typo should pass; a different word should not
+
+
+def normalise(text: str) -> str:
+    return " ".join(PUNCT.sub(" ", str(text)).lower().split())
+
+
+def close_enough(typed: str, expected: str) -> bool:
+    """Whether a typed token counts as the expected one. Typos yes, synonyms no."""
+    a, b = normalise(typed), normalise(expected)
+    if not a or not b:
+        return False
+    return a == b or difflib.SequenceMatcher(None, a, b).ratio() >= CLOSE_ENOUGH
+
+
+_SHUFFLE: dict[str, list[str]] = {}
+
+
+def shuffled_steps(card: dict) -> list[str]:
+    """One shuffle per card per session.
+
+    The card is redrawn on every keypress, and a sequence that reorders itself under the
+    reader cannot be answered by number, or read twice.
+    """
+    key = str(card.get("id", ""))
+    if key not in _SHUFFLE:
+        steps = list(card.get("sequence") or [])
+        random.shuffle(steps)
+        _SHUFFLE[key] = steps
+    return _SHUFFLE[key]
+
 
 def kind_of(card: dict, vary: bool = True) -> str:
     kind = str(card.get("kind", "recall")).lower()
@@ -969,10 +1013,9 @@ def render_prompt(card: dict, kind: str, width: int, root: Path) -> list[str]:
         blanked = CLOZE.sub(lambda m: "▁" * max(6, min(len(m.group(1)), 18)), str(card["a"]))
         out += ["", wrap(blanked, width, style=C["cyan"])]
     elif kind == "order":
-        shuffled = list(card.get("sequence") or [])
-        random.shuffle(shuffled)
         out.append("")
-        out += [f"{C['cyan']}     {step}{C['reset']}" for step in shuffled]
+        out += [f"{C['cyan']}  {n}. {step}{C['reset']}"
+                for n, step in enumerate(shuffled_steps(card), 1)]
     elif look_entries(card):
         out.append("")
         out += route_lines(card, root, width)
@@ -992,6 +1035,64 @@ def route_lines(card: dict, root: Path, width: int) -> list[str]:
         out += [f"    {link(ch, root, pth)}" for ch in chunks[1:]]
         if what:
             out.append(wrap(what, width, "    ", style=C["dim"]))
+    return out
+
+
+#: Which kinds can be marked without judgement. Everything else is prose, and prose is the
+#: reader's own to grade.
+CHECKABLE = ("cloze", "order", "locate")
+
+
+def ask_for(card: dict, kind: str) -> list[str]:
+    """The prompts to put to the reader, one per thing that has to be recalled."""
+    if kind == "cloze":
+        return [f"{n}?" for n in range(1, len(CLOZE.findall(str(card.get("a", "")))) + 1)]
+    if kind == "order":
+        return ["order? (numbers, e.g. 3 1 2 4)"]
+    return ["where? (paths, separated by spaces)"]
+
+
+def check_answer(card: dict, kind: str, typed: list[str]) -> tuple[bool, list[tuple[bool, str, str]]]:
+    """(did they get it, per-part results as (ok, expected, what they said)).
+
+    All parts or none. A partially recalled invariant is one you would act on wrongly, and
+    the override is one keypress away when that is too harsh.
+    """
+    said = " ".join(typed)
+    if kind == "cloze":
+        blanks = CLOZE.findall(str(card.get("a", "")))
+        parts = [(close_enough(t, b), b, t) for b, t in
+                 zip(blanks, list(typed) + [""] * len(blanks))]
+    elif kind == "order":
+        steps = list(card.get("sequence") or [])
+        shown = shuffled_steps(card)
+        picked = [shown[i - 1] for i in
+                  (int(tok) for tok in re.findall(r"\d+", said))
+                  if 0 < i <= len(shown)]
+        parts = [(n < len(picked) and picked[n] == step, step,
+                  picked[n] if n < len(picked) else "") for n, step in enumerate(steps)]
+    else:
+        tokens = [t for t in re.split(r"[\s,]+", said) if t]
+        parts = []
+        for path, _what in look_entries(card):
+            bare = path.split("#")[0]
+            hit = any(normalise(t) in normalise(bare) or close_enough(t, bare.rsplit("/", 1)[-1])
+                      for t in tokens)
+            parts.append((hit, path, ""))
+    return bool(parts) and all(ok for ok, _e, _s in parts), parts
+
+
+def render_check(parts: list[tuple[bool, str, str]], width: int) -> list[str]:
+    """What the reader typed, set against what was wanted."""
+    out = []
+    for ok, expected, said in parts:
+        mark = f"{sgr(114)}\u2713{C['reset']}" if ok else f"{sgr(203)}\u2717{C['reset']}"
+        # Wrapped at the mark's width, then the first line's indent is replaced by the mark,
+        # so continuation lines stay aligned under the text rather than under the tick.
+        body = wrap(expected, width, "    ")
+        out.append(f"  {mark} {body[4:]}")
+        if not ok and said:
+            out.append(wrap(f"you said: {said}", width, "      ", style=C["dim"]))
     return out
 
 
@@ -1345,9 +1446,11 @@ def run_session(queue: list[tuple], mode: str = "test") -> int:
     """
     roots = {e["name"]: Path(e["root"]).expanduser() for e, *_ in queue}
     kinds = {c["id"]: kind_of(c) for _, c, *_ in queue}
+    _SHUFFLE.clear()
     revealed: set[int] = set()
     graded: dict[int, str] = {}
     dirty: dict[str, dict] = {}
+    checked: dict[int, list] = {}
     i = 0
 
     save_prefs(mode=mode)
@@ -1357,8 +1460,14 @@ def run_session(queue: list[tuple], mode: str = "test") -> int:
         while True:
             entry, card, state, deck, _churn = queue[i]
             cs = card_state(state, card["id"])
-            draw_card(queue, i, kinds[card["id"]], roots[entry["name"]], cs,
-                      mode == "learn" or i in revealed, graded.get(i), mode)
+            kind = kinds[card["id"]]
+
+            def redraw(typing=None):
+                draw_card(queue, i, kind, roots[entry["name"]], cs,
+                          mode == "learn" or i in revealed, graded.get(i), mode,
+                          typing, checked.get(i))
+
+            redraw()
             key = read_key()
 
             if key in ("q", "esc"):
@@ -1370,9 +1479,7 @@ def run_session(queue: list[tuple], mode: str = "test") -> int:
                     cs["flagged"] = today().isoformat()
                     # Raised first, asked about second: an abandoned prompt must not lose the
                     # flag, which is the part that matters.
-                    note = read_line("why?", lambda buf: draw_card(
-                        queue, i, kinds[card["id"]], roots[entry["name"]], cs,
-                        mode == "learn" or i in revealed, graded.get(i), mode, ("why?", buf)))
+                    note = read_line("why?", lambda buf: redraw(("why?", buf)))
                     if note:
                         cs["flag_note"] = note
                 else:
@@ -1394,6 +1501,16 @@ def run_session(queue: list[tuple], mode: str = "test") -> int:
                     i += 1
                 else:
                     revealed.add(i)
+            elif key == "t" and mode == "test" and i not in revealed and kind in CHECKABLE:
+                # Typed and marked, rather than recalled and self-marked. Only for the kinds
+                # where the answer is short and exact, so the mark is a fact rather than an
+                # opinion, and it is a grade like any other: y or n puts it right.
+                typed = [read_line(label, lambda buf, lbl=label: redraw((lbl, buf)))
+                         for label in ask_for(card, kind)]
+                ok, parts = check_answer(card, kind, typed)
+                checked[i] = parts
+                revealed.add(i)
+                graded[i] = "y" if ok else "n"
             elif key in ("y", "n") and mode == "test":
                 revealed.add(i)
                 graded[i] = key
@@ -1408,7 +1525,8 @@ def run_session(queue: list[tuple], mode: str = "test") -> int:
     return finish_session(queue, graded, dirty)
 
 
-def draw_card(queue, i, kind, root, cs, revealed, grade, mode="test", typing=None) -> None:
+def draw_card(queue, i, kind, root, cs, revealed, grade, mode="test", typing=None,
+              checked=None) -> None:
     entry, card, _state, _deck, _churn = queue[i]
     cols, rows = shutil.get_terminal_size((90, 24))
     # Wrap to the widest the box may ever be, then shrink the box to what the text used.
@@ -1436,7 +1554,13 @@ def draw_card(queue, i, kind, root, cs, revealed, grade, mode="test", typing=Non
         body.append("")
     body += render_prompt(card, kind, inner - 2, root) + [""]
     if revealed:
-        body += [DIVIDER, ""] + render_answer(card, kind, inner - 2, root) + [""]
+        body += [DIVIDER, ""]
+        if checked:
+            # In the body rather than the footer: the footer is already carrying the keys and
+            # the grade, and this is the sentence that says the grade is not final.
+            body += render_check(checked, inner - 2)
+            body += [f"  {C['dim']}marked from what you typed · y or n overrides{C['reset']}", ""]
+        body += render_answer(card, kind, inner - 2, root) + [""]
         anchor = str(card.get("anchor", "-"))
         body += [f"  {C['dim']}anchor{C['reset']}  {link(anchor, root, anchor)}", ""]
     if typing is not None:
@@ -1457,7 +1581,10 @@ def draw_card(queue, i, kind, root, cs, revealed, grade, mode="test", typing=Non
     if mode == "learn":
         parts = [nav, hint("l", "test", 214), flag, quit_]
     elif not revealed:
-        parts = [nav, hint("enter", "reveal", 109), hint("l", "learn", 214), flag, quit_]
+        parts = [nav, hint("enter", "reveal", 109)]
+        if kind in CHECKABLE:
+            parts.append(hint("t", "type it", 79))
+        parts += [hint("l", "learn", 214), flag, quit_]
     else:
         parts = [nav, hint("y", "got it", 114), hint("n", "missed", 203),
                  hint("l", "learn", 214), flag, quit_]
