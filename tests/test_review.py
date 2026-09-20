@@ -130,19 +130,19 @@ class TestChecking:
 
 
 class TestTypedGrading:
-    """`t` in a session: typed, marked, and overridable."""
+    """`/` in a session: typed, marked, and overridable."""
 
     CLOZE = {"kind": "cloze", "a": "The ledger is {{authoritative}}."}
 
     def test_a_right_answer_advances_the_box(self, rc, session, card):
         state = session([card("a", anchor="src/mod.py#alpha", **self.CLOZE)],
-                        ["t", "q"], lines=["authoritative"],
+                        ["/", "q"], lines=["authoritative"],
                         state={"a": {"box": 2, "due": "2026-01-01", "seen": 1, "lapses": 0}})
         assert state["a"]["box"] == 3
 
     def test_a_wrong_answer_returns_it_to_box_one(self, rc, session, card):
         state = session([card("a", anchor="src/mod.py#alpha", **self.CLOZE)],
-                        ["t", "q"], lines=["whatever"],
+                        ["/", "q"], lines=["whatever"],
                         state={"a": {"box": 4, "due": "2026-01-01", "seen": 1, "lapses": 0}})
         assert state["a"]["box"] == 1
         assert state["a"]["lapses"] == 1
@@ -151,15 +151,59 @@ class TestTypedGrading:
         """The mark is a fact about the words, not about whether you knew it."""
         state = session([card("a", anchor="src/mod.py#alpha", **self.CLOZE),
                          card("b", anchor="src/mod.py#alpha")],
-                        ["t", "y", "q"], lines=["not the word"],
+                        ["/", "y", "q"], lines=["not the word"],
                         state={"a": {"box": 2, "due": "2026-01-01", "seen": 1, "lapses": 0}})
         assert state["a"]["box"] == 3
         assert state["a"]["lapses"] == 0
 
     def test_typing_is_not_offered_in_learn_mode(self, rc, session, card):
         state = session([card("a", anchor="src/mod.py#alpha", **self.CLOZE)],
-                        ["t", "q"], lines=["authoritative"], mode="learn")
+                        ["/", "q"], lines=["authoritative"], mode="learn")
         assert state == {}
+
+    def test_the_old_type_key_no_longer_does_anything(self, rc, session, card):
+        """One key for one thing: `/` is what the field advertises."""
+        state = session([card("a", anchor="src/mod.py#alpha", **self.CLOZE)],
+                        ["t", "q"], lines=["authoritative"],
+                        state={"a": {"box": 2, "due": "2026-01-01", "seen": 1, "lapses": 0}})
+        assert state == {}
+
+
+class TestAnswerField:
+    """The field on the front of a card, which is the only thing saying it can be answered."""
+
+    def plain(self, rc, lines):
+        return rc._INVISIBLE.sub("", "\n".join(lines))
+
+    def test_the_field_rests_with_a_placeholder_in_it(self, rc):
+        assert self.plain(rc, rc.answer_field("recall", None, 60)) == "  answer: type / to start"
+
+    def test_typing_replaces_the_placeholder(self, rc):
+        out = self.plain(rc, rc.answer_field("recall", "a prompt", 60))
+        assert out == "  answer: a prompt\u2588"
+
+    def test_a_kind_with_a_shape_says_what_it_wants(self, rc):
+        """The placeholder is where `numbers, not words` is said, since the field is always up."""
+        assert "numbers" in self.plain(rc, rc.answer_field("order", None, 60))
+        assert "paths" in self.plain(rc, rc.answer_field("locate", None, 60))
+
+    def test_a_cloze_has_no_field_because_it_fills_the_sentence(self, rc):
+        out = self.plain(rc, rc.answer_field("cloze", None, 60))
+        assert out == "  type / to fill the blanks"
+
+    def test_a_long_answer_wraps_rather_than_running_off_the_edge(self, rc):
+        """The page cuts an overlong line at the end, which is the half you are writing."""
+        typed = "the row says this invoice changed and the bytes are rendered at send time"
+        out = self.plain(rc, rc.answer_field("recall", typed, 50)).split("\n")
+        assert len(out) > 1
+        assert all(len(ln) <= 50 for ln in out)
+        assert out[-1].endswith("\u2588")
+
+    def test_a_word_too_long_to_break_on_a_space_is_split(self, rc):
+        """Otherwise the line is cut and the cursor goes with it."""
+        out = self.plain(rc, rc.answer_field("locate", "src/" + "billing/" * 12, 50)).split("\n")
+        assert all(len(ln) <= 50 for ln in out)
+        assert out[-1].endswith("\u2588")
 
 
 class TestOverlapHint:
@@ -195,12 +239,12 @@ class TestOverlapHint:
 
     def test_a_typed_prose_answer_reveals_but_does_not_grade(self, rc, session, card):
         state = session([card("a", anchor="src/mod.py#alpha", a=self.ANSWER)],
-                        ["t", "q"], lines=["something about ledgers"])
+                        ["/", "q"], lines=["something about ledgers"])
         assert state == {}
 
     def test_you_still_grade_it_yourself(self, rc, session, card):
         state = session([card("a", anchor="src/mod.py#alpha", a=self.ANSWER)],
-                        ["t", "y", "q"], lines=["the ledger is authoritative"],
+                        ["/", "y", "q"], lines=["the ledger is authoritative"],
                         state={"a": {"box": 1, "due": "2026-01-01", "seen": 2, "lapses": 0}})
         assert state["a"]["box"] == 2
 

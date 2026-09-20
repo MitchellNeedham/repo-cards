@@ -1321,15 +1321,38 @@ def route_lines(card: dict, root: Path, width: int) -> list[str]:
 CHECKABLE = ("cloze", "order", "locate")
 
 
-def ask_for(card: dict, kind: str) -> list[str]:
-    """The prompts to put to the reader, one per thing that has to be recalled."""
-    if kind == "cloze":
-        return [f"{n}?" for n in range(1, len(CLOZE.findall(str(card.get("a", "")))) + 1)]
-    if kind == "order":
-        return ["order? (numbers, e.g. 3 1 2 4)"]
-    if kind == "locate":
-        return ["where? (paths, separated by spaces)"]
-    return ["answer?"]
+#: The field on the front of a card: its label, and the grey placeholder standing in the
+#: field until you type over it. A card that said nothing about being answerable was only
+#: ever flipped, so the field sits there from the start rather than appearing on a keypress,
+#: and the placeholder is where the key and the shape of the answer are said.
+FIELD = {"recall": ("answer:", "type / to start"),
+         "order": ("order:", "type / to start, numbers like 3 1 2 4"),
+         "locate": ("where:", "type / to start, paths separated by spaces"),
+         "cloze": ("", "type / to fill the blanks")}
+
+
+def typed_line(label: str, buf: str, width: int) -> str:
+    """A label and what is being typed after it, wrapped.
+
+    Wrapped rather than left to run off the edge, because the page cuts an overlong line and
+    what it cuts is the end, which is the half you are writing. A word too long to break on a
+    space is split first: `wrap` leaves one on a line of its own, and the cut takes the
+    cursor with it.
+    """
+    room = max(8, width - visible_len(label) - 3)
+    typed = " ".join(part for word in f"{buf}\u2588".split() for part in hard_break(word, room))
+    return wrap(f"{sgr(179)}{label}{C['reset']} {typed}", width)
+
+
+def answer_field(kind: str, buf: str | None, width: int) -> list[str]:
+    """The field as it rests, or as it is being typed into. `buf` is None until you start."""
+    label, hint = FIELD.get(kind, FIELD["recall"])
+    if not label:
+        # A cloze is filled in the sentence itself, so there is no field to put anywhere.
+        return [f"  {C['dim']}{hint}{C['reset']}"] if buf is None else []
+    if buf is None:
+        return [wrap(f"{sgr(179)}{label}{C['reset']} {C['dim']}{hint}{C['reset']}", width)]
+    return [typed_line(label, buf, width)]
 
 
 def check_answer(card: dict, kind: str, typed: list[str]) -> tuple[bool, list[tuple[bool, str, str]]]:
@@ -1869,7 +1892,7 @@ def run_session(queue: list[tuple], mode: str = "test") -> int:
                     line = read_line("note:", lambda buf: redraw({"label": "note:", "buf": buf}))
                     if line:
                         append_card_note(entry["name"], card["id"], line)
-            elif key == "t" and mode == "test" and i not in revealed:
+            elif key == "/" and mode == "test" and i not in revealed:
                 if kind == "cloze":
                     # Filled in place, one blank at a time, with the sentence around it: the
                     # words either side are most of what tells you which word belongs there.
@@ -1879,9 +1902,8 @@ def run_session(queue: list[tuple], mode: str = "test") -> int:
                             f"blank {n + 1}",
                             lambda buf, n=n, done=list(typed): redraw({"cloze": (done, n, buf)})))
                 else:
-                    typed = [read_line(label, lambda buf, lbl=label:
-                                       redraw({"label": lbl, "buf": buf}))
-                             for label in ask_for(card, kind)]
+                    typed = [read_line(FIELD.get(kind, FIELD["recall"])[0],
+                                       lambda buf: redraw({"answer": buf}))]
                 revealed.add(i)
                 if kind in CHECKABLE:
                     # Short and exact, so the mark is a fact rather than an opinion, and it
@@ -1979,7 +2001,7 @@ KEYS = [
     ("↑/↓", "move between a card's tabs", "both"),
     ("enter", "flip the card, then move on", "test"),
     ("y / n", "got it / missed, which moves the box", "test"),
-    ("t", "type your answer: marked for cloze, order and locate,", "test"),
+    ("/", "type your answer: marked for cloze, order and locate,", "test"),
     ("", "measured against the card's words for prose", "test"),
     ("1-9", "open that route in $EDITOR, $PAGER or less", "both"),
     ("f", "flag the card as suspect, and say why", "both"),
@@ -2052,7 +2074,7 @@ def card_keys(kind: str, cs: dict, revealed: bool, mode: str, routes: int = 0) -
     if mode == "learn":
         parts = [nav, key_hint("↑/↓", "tabs", 109), flag, key_hint("e", "note", 109), helps]
     elif not revealed:
-        parts = [nav, key_hint("enter", "flip", 109), key_hint("t", "type", 79), go, flag, helps]
+        parts = [nav, key_hint("enter", "flip", 109), key_hint("/", "answer", 79), go, flag, helps]
     else:
         parts = [nav, key_hint("↑/↓", "tabs", 109), key_hint("y", "got it", 114),
                  key_hint("n", "missed", 203), key_hint("e", "note", 109), helps]
@@ -2107,6 +2129,8 @@ def draw_card(queue, i, kind, root, cs, revealed, grade, mode="test", typing=Non
                      f"esc to give up{C['reset']}"]
         else:
             body += render_prompt(card, kind, text_width, root)
+            body += [""] + answer_field(kind, typing.get("answer") if typing else None,
+                                        text_width)
     else:
         # One dim line of what was asked. You grade yourself against the question, so it
         # cannot leave the screen, but it has done its work and the answer needs the space.
@@ -2138,8 +2162,10 @@ def draw_card(queue, i, kind, root, cs, revealed, grade, mode="test", typing=Non
             body += render_why(card, _deck, cs, _churn, text_width)
         else:
             body += [wrap(str(card.get("q", "")), text_width, "  ", style=C["bold"])]
-    if typing and not typing.get("cloze"):
-        body += ["", f"  {sgr(179)}{typing['label']}{C['reset']} {typing['buf']}\u2588"]
+    if typing and typing.get("label"):
+        # The flag's detail and a note are typed on either face, so they sit under whatever
+        # is there rather than in the card's own field.
+        body += ["", typed_line(typing["label"], typing["buf"], text_width)]
     if trouble:
         body += ["", f"  {sgr(203)}!{C['reset']} {C['dim']}{trouble}{C['reset']}"]
 

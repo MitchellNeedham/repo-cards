@@ -103,9 +103,15 @@ the answer, the anchor and your note come to 23 rows against the 21 a terminal g
     2 → docs/adr/adr-7-outbox.md
         the decision, and what it rejected
 
+    answer: type / to start
+
   ────────────────────────────────────────────────────────────────────────
-  ←/→ move · enter flip · t type · 1-2 open · f flag · ? keys
+  ←/→ move · enter flip · / answer · 1-2 open · f flag · ? keys
 ```
+
+**The field is on the card from the start**, because a card that says nothing about being
+answerable only ever gets flipped. `/` puts the cursor in it and the grey placeholder gives
+way to what you type; `order` and `locate` say in the same place what shape they want.
 
 **The routes are numbered because the number opens them.** `1` opens that file in `$EDITOR`, at
 the line the anchored symbol is defined on where the editor takes `+N`, and drops you back on the
@@ -188,7 +194,7 @@ An update rewrites cards and never touches your notes. They show on the card's `
 a sequence, and `locate` asks *where you would look*, treating the routes as the answer. A recall
 card with good routes is asked that way about one time in six.
 
-**Those three can be typed and marked** with `t`, because their answers are short and exact. A
+**Those three can be typed and marked** with `/`, because their answers are short and exact. A
 cloze is filled in place, one blank at a time, because the words either side are most of what tells
 you which word belongs there:
 
@@ -214,7 +220,7 @@ bar moves with the word rather than being one ratio for all of them: `0.85` forg
 `authoritative` and nothing at all of `box`, where a single slip scores `0.67`, so short blanks are
 held to one edit instead.
 
-On a **prose** card `t` measures instead of marking, and names the words you did not produce:
+On a **prose** card `/` measures instead of marking, and names the words you did not produce:
 
 ```
     you said
