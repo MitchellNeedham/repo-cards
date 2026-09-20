@@ -113,7 +113,7 @@ CHURN_FLOOR = 3
 CHURN_WEIGHT = 0.5
 
 C = {
-    "dim": "\033[2m", "bold": "\033[1m", "reset": "\033[0m",
+    "dim": "\033[2m", "bold": "\033[1m", "strike": "\033[9m", "reset": "\033[0m",
     "green": "\033[32m", "red": "\033[31m", "yellow": "\033[33m", "cyan": "\033[36m",
 }
 if not sys.stdout.isatty() or os.environ.get("NO_COLOR"):
@@ -1940,21 +1940,45 @@ def one_line(text: str, width: int) -> str:
 
 #: Faces of a revealed card. Everything the card knows gets a whole screen instead of a
 #: share of one, which is what makes room for material the old layout had nowhere to put.
+#: The order is fixed and every card shows all five, so a name is always in the same place.
+TAB_ORDER = ("answer", "routes", "note", "why", "question")
+
+
 def card_tabs(card: dict, entry: dict, kind: str) -> list[str]:
-    tabs = ["answer"]
+    """The faces this card actually has, which is what `↑`/`↓` steps through."""
+    have = {"answer", "why", "question"}
     if look_entries(card) and kind != "locate":
-        tabs.append("routes")
+        have.add("routes")
     if read_card_note(entry["name"], card["id"]):
-        tabs.append("note")
-    return tabs + ["why", "question"]
+        have.add("note")
+    return [name for name in TAB_ORDER if name in have]
 
 
-def render_tab_row(tabs: list[str], active: int, width: int) -> str:
+def render_tab_row(tabs: list[str], active: str, width: int) -> list[str]:
+    """The faces, always in the same columns, and the keys that move between them.
+
+    A face this card has not got keeps its slot rather than closing the gap: a row whose
+    names shuffle as routes and notes come and go has to be read afresh every card. It is
+    struck out rather than a fainter grey, which reads as absent on a dark background and
+    as emphasis on a light one.
+    """
     out = []
-    for n, name in enumerate(tabs):
-        out.append(f"{sgr(109)}{C['bold']}{name}{C['reset']}" if n == active
-                   else f"{C['dim']}{name}{C['reset']}")
-    return "  " + f" {C['dim']}│{C['reset']} ".join(out)
+    for name in TAB_ORDER:
+        if name == active:
+            out.append(f"{sgr(109)}{C['bold']}{name}{C['reset']}")
+        elif name in tabs:
+            out.append(f"{C['dim']}{name}{C['reset']}")
+        else:
+            out.append(f"{C['dim']}{C['strike']}{name}{C['reset']}")
+
+    hint = "move between these"
+    # The second clause earns its room only when there is something struck out to explain.
+    if len(tabs) < len(TAB_ORDER):
+        hint += " · struck out: not on this card"
+    if len(hint) + 6 > width:
+        hint = "move between these"
+    return ["  " + f" {C['dim']}│{C['reset']} ".join(out),
+            f"  {sgr(109)}↑/↓{C['reset']} {C['dim']}{hint}{C['reset']}"]
 
 
 def render_why(card: dict, deck: dict, cs: dict, churn: tuple[dict, float], width: int) -> list[str]:
@@ -2072,12 +2096,12 @@ def card_keys(kind: str, cs: dict, revealed: bool, mode: str, routes: int = 0) -
     helps = key_hint("?", "keys", 245)
     go = key_hint("1" if routes == 1 else f"1-{routes}", "open", 79) if routes else ""
     if mode == "learn":
-        parts = [nav, key_hint("↑/↓", "tabs", 109), flag, key_hint("e", "note", 109), helps]
+        parts = [nav, flag, key_hint("e", "note", 109), helps]
     elif not revealed:
         parts = [nav, key_hint("enter", "flip", 109), key_hint("/", "answer", 79), go, flag, helps]
     else:
-        parts = [nav, key_hint("↑/↓", "tabs", 109), key_hint("y", "got it", 114),
-                 key_hint("n", "missed", 203), key_hint("e", "note", 109), helps]
+        parts = [nav, key_hint("y", "got it", 114), key_hint("n", "missed", 203),
+                 key_hint("e", "note", 109), helps]
     return f" {C['dim']}·{C['reset']} ".join(p for p in parts if p)
 
 
@@ -2136,8 +2160,8 @@ def draw_card(queue, i, kind, root, cs, revealed, grade, mode="test", typing=Non
         # cannot leave the screen, but it has done its work and the answer needs the space.
         tabs = card_tabs(card, entry, kind)
         active = tabs[tab % len(tabs)]
-        body += [f"  {C['dim']}{one_line(card.get('q', ''), text_width - 2)}{C['reset']}", "",
-                 render_tab_row(tabs, tab % len(tabs), text_width), ""]
+        body += [f"  {C['dim']}{one_line(card.get('q', ''), text_width - 2)}{C['reset']}", ""]
+        body += render_tab_row(tabs, active, text_width) + [""]
 
         anchor = str(card.get("anchor", "-"))
         if active == "answer":

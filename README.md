@@ -129,7 +129,8 @@ asked, and the routes give way to the answer:
 
     ADR-7: enqueue writes an empty payload. Why is the outbox row blank…
 
-    answer │ routes │ note │ why │ question
+    answer │ routes │ n̶o̶t̶e̶ │ why │ question
+    ↑/↓ move between these · struck out: not on this card
 
     It makes the message a prompt, not a snapshot. The row says this
     invoice changed; the bytes are rendered at send time from the
@@ -138,12 +139,14 @@ asked, and the routes give way to the answer:
     ⚓  src/billing/outbox.py#enqueue
 
   ────────────────────────────────────────────────────────────────────────
-  ←/→ move · ↑/↓ tabs · y got it · n missed · e note · ? keys
+  ←/→ move · y got it · n missed · e note · ? keys
 ```
 
-`←`/`→` move between cards, `↑`/`↓` move between a card's tabs, and `?` shows every key and every
-mark on its own screen, so the row at the bottom only ever carries what is live on the face in
-front of you. The row of pips under the
+`←`/`→` move between cards and `↑`/`↓` move between a card's tabs, which the row says itself
+rather than leaving to the keys at the bottom. **Every card shows all five tabs**, in the same
+columns, with the ones it has not got struck out and skipped, so the row is learned once instead
+of read again on each card. `?` shows every key and every mark on its own screen, so the row at
+the bottom only ever carries what is live on the face in front of you. The row of pips under the
 header is the session: green for right, red for missed, amber for flagged, hollow for still to
 come. `1/2` says where you are; the strip says how it has been going.
 

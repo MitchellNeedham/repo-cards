@@ -340,6 +340,52 @@ class TestWhyThisCard:
         assert "routes" not in rc.card_tabs({"id": "a", "look": {"a": "x", "b": "y"}}, entry, "locate")
 
 
+class TestTabRow:
+    """The row of faces: the same names in the same columns on every card."""
+
+    @staticmethod
+    def plain(rc, lines):
+        return [rc._INVISIBLE.sub("", ln).strip() for ln in lines]
+
+    def test_the_row_reads_the_same_whatever_the_card_carries(self, rc):
+        """The complaint it answers: why and question used to move as routes came and went."""
+        everything = self.plain(rc, rc.render_tab_row(list(rc.TAB_ORDER), "answer", 76))
+        bare = self.plain(rc, rc.render_tab_row(["answer", "why", "question"], "answer", 76))
+        assert everything[0] == bare[0]
+        assert bare[0].split() == ["answer", "\u2502", "routes", "\u2502", "note",
+                                   "\u2502", "why", "\u2502", "question"]
+
+    def test_a_face_this_card_has_not_got_is_struck_out(self, rc, monkeypatch):
+        """Piped output has no colour at all, so the three states only differ in front of one."""
+        for key, code in (("reset", "\033[0m"), ("bold", "\033[1m"),
+                          ("dim", "\033[2m"), ("strike", "\033[9m")):
+            monkeypatch.setitem(rc.C, key, code)
+        row = rc.render_tab_row(["answer", "why", "question"], "answer", 76)[0]
+        assert "\033[9mroutes" in row and "\033[9mnote" in row
+        assert "\033[9mwhy" not in row and "\033[9manswer" not in row
+
+    def test_the_keys_that_move_between_them_sit_under_the_row(self, rc):
+        assert "\u2191/\u2193" in self.plain(rc, rc.render_tab_row(list(rc.TAB_ORDER), "why", 76))[1]
+
+    def test_the_strike_is_explained_only_when_something_is_struck(self, rc):
+        full = self.plain(rc, rc.render_tab_row(list(rc.TAB_ORDER), "answer", 76))[1]
+        some = self.plain(rc, rc.render_tab_row(["answer", "why", "question"], "answer", 76))[1]
+        assert "struck out" not in full
+        assert "struck out" in some
+
+    def test_a_narrow_page_keeps_the_keys_and_drops_the_aside(self, rc):
+        width = rc.MIN_WIDTH - 2
+        lines = self.plain(rc, rc.render_tab_row(["answer", "why", "question"], "answer", width))
+        assert "\u2191/\u2193" in lines[1] and "struck out" not in lines[1]
+        assert all(len(ln) <= width for ln in lines)
+
+    def test_the_key_row_no_longer_repeats_the_hint(self, rc):
+        """Said once, beside the row it drives. The whole set is still behind `?`."""
+        for mode in ("test", "learn"):
+            assert "tabs" not in rc._INVISIBLE.sub("", rc.card_keys("recall", {}, True, mode))
+        assert any(key == "\u2191/\u2193" for key, _what, _when in rc.KEYS)
+
+
 class TestQueueStrip:
     """The session in one row."""
 

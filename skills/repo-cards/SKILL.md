@@ -376,7 +376,8 @@ changes** rather than a stable summary of it: an anchor nothing commits to will 
 either.
 
 A flipped card has tabs, moved between with `↑`/`↓`: the answer, the routes, your note, the
-full question, and **why** this card is in front of you. That last one prints the queue score
+full question, and **why** this card is in front of you. All five are on every card, in the same
+columns, struck out where this card has not got one. That last one prints the queue score
 the scheduler actually used, broken into its parts: the priority tier, days overdue, how much
 the anchor has moved, and how it compares to the rest of the deck. Point somebody at it when
 they ask why they keep seeing a card, and at its lapse count when the answer is that the card
