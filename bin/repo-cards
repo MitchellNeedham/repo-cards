@@ -691,6 +691,14 @@ def collect(args) -> list[tuple[dict, dict, dict, dict, tuple]]:
 
 # --- rendering ---------------------------------------------------------------
 
+# SGR colour codes and OSC 8 hyperlink wrappers both occupy no columns.
+_INVISIBLE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\]8;;[^\x1b]*\x1b\\")
+
+
+def visible_len(text: str) -> int:
+    return len(_INVISIBLE.sub("", text))
+
+
 LIST_MARKER = re.compile(r"^(\s*)((?:\d+[.)]|[-*•])\s+)")
 
 
@@ -730,7 +738,11 @@ def wrap(text: str, width: int, indent: str = "  ", style: str = "") -> str:
         out, cur = [], ""
         lead = first if first is not None else hang
         for word in para.split():
-            if cur and len(cur) + len(word) + 1 + len(lead if not out else hang) > width:
+            # Columns, not characters. A word carrying a colour or a hyperlink costs twenty
+            # characters the terminal never draws, and counting them breaks the line a
+            # third of the way across.
+            room = visible_len(cur) + visible_len(word) + 1 + len(lead if not out else hang)
+            if cur and room > width:
                 out.append((lead if not out else hang) + cur)
                 cur = word
             else:
@@ -790,7 +802,7 @@ def wrap(text: str, width: int, indent: str = "  ", style: str = "") -> str:
             lines.append("")
         elif aligned(para):
             flush()
-            if len(para) + len(indent) <= width:
+            if visible_len(para) + len(indent) <= width:
                 lines.append(indent + para)
             else:
                 lead = " " * (len(para) - len(para.lstrip()))
@@ -2099,14 +2111,6 @@ def draw_card(queue, i, kind, root, cs, revealed, grade, mode="test", typing=Non
               card_keys(kind, cs, revealed, mode, min(9, len(look_entries(card)))),
               card_state_mark(cs, grade),
               strip=queue_strip(queue, i, graded or {}, text_width) if len(queue) > 1 else "")
-
-
-# SGR colour codes and OSC 8 hyperlink wrappers both occupy no columns.
-_INVISIBLE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\]8;;[^\x1b]*\x1b\\")
-
-
-def visible_len(text: str) -> int:
-    return len(_INVISIBLE.sub("", text))
 
 
 def ansi_truncate(text: str, limit: int) -> str:

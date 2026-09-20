@@ -312,6 +312,18 @@ class TestDiffAndInPlaceCloze:
     def plain(self, rc, lines):
         return rc._INVISIBLE.sub("", "\n".join(lines))
 
+    def test_the_marked_answer_still_fills_the_line(self, rc, monkeypatch):
+        """Colour is off when the output is piped, so the paint that broke the measure only
+        exists in front of a terminal. Turned on here, which is where the bug lived."""
+        for key, code in (("reset", "\033[0m"), ("bold", "\033[1m"),
+                          ("cyan", "\033[36m"), ("dim", "\033[2m")):
+            monkeypatch.setitem(rc.C, key, code)
+        answer = " ".join(["alpha bravo charlie delta echo foxtrot"] * 3)
+        lines = self.plain(rc, rc.render_overlap("nothing", answer, 60)).split("\n")
+        filled = [ln for ln in lines if "alpha" in ln or "bravo" in ln]
+        assert min(len(ln) for ln in filled[:-1]) > 45
+        assert all(len(ln) <= 60 for ln in lines)
+
     def test_the_words_you_missed_are_named(self, rc):
         out = self.plain(rc, rc.render_overlap("the row says it changed", self.ANSWER, 70))
         assert "you did not say:" in out
@@ -347,6 +359,22 @@ class TestDiffAndInPlaceCloze:
         card = {"id": "c", "a": "The ledger is {{authoritative}}; written {{in one transaction}}."}
         out = rc._INVISIBLE.sub("", rc.cloze_sentence(card, [], 0, "auth"))
         assert "▁" in out.split(";")[1]
+
+
+class TestWrapping:
+    """A line is measured in the columns it occupies, not the characters it carries."""
+
+    WORDS = "alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima"
+
+    def test_painting_a_word_does_not_move_the_break(self, rc):
+        """A coloured word carries twenty characters the terminal never draws."""
+        painted = rc.wrap(" ".join(f"\033[1m{w}\033[0m" for w in self.WORDS.split()), 40)
+        assert rc._INVISIBLE.sub("", painted) == rc.wrap(self.WORDS, 40)
+
+    def test_a_hyperlink_does_not_move_it_either(self, rc):
+        """An OSC 8 wrapper is longer than the path it links, and it is drawn as the path."""
+        linked = " ".join(f"\033]8;;file:///{w}\033\\{w}\033]8;;\033\\" for w in self.WORDS.split())
+        assert rc._INVISIBLE.sub("", rc.wrap(linked, 40)) == rc.wrap(self.WORDS, 40)
 
 
 class TestOpeningRoutes:
