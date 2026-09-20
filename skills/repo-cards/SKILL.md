@@ -32,7 +32,9 @@ repo-cards export --repo NAME   # write the deck out, to share or to commit
 repo-cards import PATH          # install a deck somebody else wrote
 repo-cards stats                # due counts, box distribution, stickiest cards
 repo-cards flags                # cards flagged as suspect during review
-repo-cards flags --clear        # clear them, once an update has dealt with them
+repo-cards flags --clear --outcome rewritten|retired|kept   # clear them, saying what you did
+repo-cards feedback --repo NAME # every flag ever raised, and how it was resolved
+repo-cards feedback --open      # only the ones nothing has dealt with yet
 repo-cards list --repo NAME     # every card with its box and due date
 repo-cards topics               # what topics a deck defines
 repo-cards brief --topic NAME   # read one area end to end; writes no state
@@ -50,6 +52,7 @@ the layout is:
     deck.yaml              the cards. Content only
     state.json             Leitner state, keyed by card id. NEVER edit or regenerate this
     notes/                 long-form notes for this repo, if any
+      feedback.jsonl       every flag ever raised on this deck. Append-only history
 ```
 
 A deck is content and nothing else: no paths, no schedule, no machine. `repo-cards export` writes
@@ -274,25 +277,32 @@ feature spans tags or when the order matters.
 
 1. `repo-cards register <repo root>` first, so the deck has a home. Confirm the path with
    `repo-cards home` if the user asks where things went.
-2. Read the repo's own orientation: `CLAUDE.md`, `README.md`, the docs index, any ADR folder or
+2. **Read `repo-cards feedback --repo <name>` before drafting anything**, on a repo that has a
+   history. It is every objection a reader has ever raised against this deck and what was done
+   about it, which is the one input that cannot be derived from the repo. Cards retired as
+   `not useful` mark ground that does not earn a card; `badly asked` marks questions this codebase
+   phrases badly; `never was true` marks an area a previous pass misread, so read it more carefully
+   this time. Do not re-write a card the log says was retired, and say in the report which
+   feedback you acted on.
+3. Read the repo's own orientation: `CLAUDE.md`, `README.md`, the docs index, any ADR folder or
    decision register. **This is where the load-bearing knowledge already is.** A repo with a
    decisions register has done most of the work for you.
-3. For a repo with no such record, derive it: the invariants are implicit in what the tests assert
+4. For a repo with no such record, derive it: the invariants are implicit in what the tests assert
    and what the code comments defend, and `git log` shows what has been fixed twice.
-4. Draft cards against the bar above. Group by theme with `# ---` section comments.
-5. Write the deck to `<data home>/<name>/deck.yaml` with `repo`, `description`,
+5. Draft cards against the bar above. Group by theme with `# ---` section comments.
+6. Write the deck to `<data home>/<name>/deck.yaml` with `repo`, `description`,
    `last_update_sha` (current short HEAD) and `last_update_date`. Do **not** put the repo root in
    the deck: that is machine-specific and lives in the registry.
-6. **Propose topics** in the same pass, per the section above. They are cheap while the whole deck
+7. **Propose topics** in the same pass, per the section above. They are cheap while the whole deck
    is in front of you and tedious to retrofit.
-7. **Validate with `repo-cards check --repo <name>` and fix what it reports.** It enforces what
+8. **Validate with `repo-cards check --repo <name>` and fix what it reports.** It enforces what
    this file describes: duplicate ids, missing fields, topic ids that resolve to nothing, routes
    and notes files that do not exist, cross-repo refs naming an unregistered repo, cloze cards with
    no blanks. It also warns where the deck misses its own bar: anchors with no `#symbol`, questions
    answerable yes or no, answers longer than four sentences, cards with fewer than two routes.
    Errors are defects and must be fixed. Warnings are judgement, so fix the ones that are right and
    say why you are keeping the rest.
-8. Report the card count, the tag breakdown and the topics, and name anything deliberately left
+9. Report the card count, the tag breakdown and the topics, and name anything deliberately left
    out.
 
 ## Mode: update
@@ -305,9 +315,13 @@ Then, in order:
 
 1. **Start with the cards the reader flagged.** `f` during review marks a card the reader did not
    believe, and that is a stronger signal than any commit: they met the card, knew the area, and
-   said it was wrong. Verify each one, rewrite or retire it, and clear the flags with
-   `repo-cards flags --clear --repo <name>` once they are dealt with. A flag left standing after an
-   update is worse than none, because the next pass re-reads a card that is now fine.
+   said it was wrong. Each one carries a reason and usually a line of detail, and the reason says
+   what is being asked of you: see the table in *Reviewing*. Verify each one, rewrite or retire it,
+   then clear it with what you did:
+   `repo-cards flags --clear --repo <name> <card-id> --outcome rewritten|retired|kept`. A flag left
+   standing after an update is worse than none, because the next pass re-reads a card that is now
+   fine, and an outcome left unrecorded costs the next generate the only account it has of what
+   this deck gets wrong. Clear per card rather than in bulk, so each outcome is true.
 2. **Rewrite the cards nobody can hold on to.** `drift` lists cards missed three times or more.
    That is almost never a hard fact: it is two facts under one id, or a question that can be
    recognised rather than answered. Split it or rewrite the question. Keep the id if the fact is
@@ -393,10 +407,26 @@ response: a miss is a scheduling fact, a flag is a defect in the deck. Flags are
 of `repo-cards drift` and the first step of an update, because a reader who knows the area and does
 not believe the card is a better signal than any diff.
 
-Flagging asks **why**, and the answer is carried into the report in the reader's own words. Take it
-seriously: "rendered in the worker now, not at send time" points straight at what to read, where
-the flag alone only says which card to doubt. The note is raised after the flag, so an abandoned
-prompt still leaves the flag standing.
+Flagging asks **what is wrong**, as one of four reasons, and then for a line of detail:
+
+| reason | stored as | what it asks an update to do |
+|---|---|---|
+| not true any more | `stale` | re-read the anchor as it is now, and rewrite the fact |
+| never was true | `wrong` | the fact was never right: rewrite it or retire the card, and treat the generator's reading of that area as suspect |
+| not useful | `useless` | retire it. The bar was missed, not the fact: it is trivial, or a grep answers it |
+| badly asked | `unclear` | keep the fact, rewrite the question: it is vague, or two facts under one id |
+
+The reason is optional (`enter` skips it) and the detail almost always carries more than the
+category does. Take it seriously: "rendered in the worker now, not at send time" points straight at
+what to read, where the flag alone only says which card to doubt. Both are raised after the flag,
+so an abandoned prompt still leaves the flag standing.
+
+**Flags are kept after they are cleared.** Clearing one takes it out of the queue, not out of the
+record: every flag ever raised is appended to `notes/feedback.jsonl` with its reason, the reader's
+words, the question as it read at the time, and what was eventually done about it. It lives under
+`notes/`, so a regenerate cannot touch it and `export` carries it with the deck. Never hand-edit
+it; `repo-cards flags --clear` and `repo-cards feedback` are the only ways it should be written and
+read.
 
 **`e` writes your own note on a card**, opened in `$EDITOR` where there is one and taken as a line
 otherwise. It is kept in `notes/cards/<id>.md`, not on the card, for two reasons: an update rewrites

@@ -208,6 +208,105 @@ def append_card_note(name: str, card_id: str, line: str) -> None:
     path.write_text((existing + "\n" if existing else "") + line.strip() + "\n")
 
 
+# --- what a reader told you about a card --------------------------------------
+#
+# A flag is feedback, and feedback thrown away after one update teaches nothing twice. The
+# live flag in `state.json` says which cards *this* pass must look at. This log says what
+# every reader has ever objected to and what was done about it, which is the part a later
+# generate can learn from: the same bad card does not get written again, and the deck gets
+# better the more you flag.
+#
+# It lives under notes/, so a regenerate cannot touch it and `export` hands it on with the
+# deck. Each entry is self-contained, question and anchor copied in as they read at the
+# time, because the card an entry is about is often retired by the very update that reads it.
+
+#: (stored key, what it says, the gloss under it). Four rather than one free-text field,
+#: because the first two want opposite things from an update: "the repo moved on" is a fact
+#: to re-read, "this was never true" is a card the generator should not have written.
+FLAG_REASONS = [
+    ("stale", "not true any more", "the repo moved on"),
+    ("wrong", "never was true", "wrong when it was written"),
+    ("useless", "not useful", "trivial, or a grep answers it"),
+    ("unclear", "badly asked", "vague, two facts, unanswerable"),
+]
+REASON_LABEL = {key: label for key, label, _gloss in FLAG_REASONS}
+
+#: What an update did about a flag, recorded when it is cleared. `withdrawn` is the reader
+#: taking it back with a second `f`, and is the only one nobody has to type.
+OUTCOMES = ("rewritten", "retired", "kept")
+
+
+def feedback_path(name: str) -> Path:
+    return deck_dir(name) / "notes" / "feedback.jsonl"
+
+
+def read_feedback(name: str) -> list[dict]:
+    """Every flag ever raised on this deck, oldest first.
+
+    One unreadable line is skipped rather than fatal: this file is append-only history, and
+    losing all of it because of one bad write would be the worst possible failure for it.
+    """
+    out: list[dict] = []
+    try:
+        text = feedback_path(name).read_text()
+    except OSError:
+        return out
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        try:
+            out.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return out
+
+
+def write_feedback(name: str, entries: list[dict]) -> None:
+    path = feedback_path(name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("".join(json.dumps(e, sort_keys=True) + "\n" for e in entries))
+
+
+def append_feedback(name: str, card: dict, cs: dict) -> None:
+    """Record a raised flag, with the card as it read when the objection was made."""
+    entry = {"card": card["id"], "raised": cs.get("flagged") or today().isoformat(),
+             "reason": cs.get("flag_reason", ""), "note": cs.get("flag_note", ""),
+             "q": str(card.get("q", "")), "anchor": str(card.get("anchor", ""))}
+    path = feedback_path(name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a") as fh:
+        fh.write(json.dumps(entry, sort_keys=True) + "\n")
+
+
+def resolve_feedback(name: str, card_ids: set[str], outcome: str) -> int:
+    """Stamp the open entries for these cards with what was done about them."""
+    entries = read_feedback(name)
+    stamped = 0
+    for e in entries:
+        if e.get("card") in card_ids and not e.get("resolved"):
+            e["resolved"] = today().isoformat()
+            e["outcome"] = outcome
+            stamped += 1
+    if stamped:
+        write_feedback(name, entries)
+    return stamped
+
+
+def merge_feedback(name: str, mine: list[dict]) -> int:
+    """Fold entries back in after an import copied somebody else's log over the top.
+
+    A deck is worth handing over and so are the flags raised on it, but not at the price of
+    losing your own on the way in.
+    """
+    theirs = read_feedback(name)
+    seen = {json.dumps(e, sort_keys=True) for e in theirs}
+    added = [e for e in mine if json.dumps(e, sort_keys=True) not in seen]
+    if added:
+        write_feedback(name, sorted(theirs + added,
+                                    key=lambda e: (str(e.get("raised", "")), str(e.get("card", "")))))
+    return len(added)
+
+
 def run_outside_screen(argv: list[str]) -> bool:
     """Hand the terminal over to another program and take it back afterwards.
 
@@ -1344,6 +1443,30 @@ def typed_line(label: str, buf: str, width: int) -> str:
     return wrap(f"{sgr(179)}{label}{C['reset']} {typed}", width)
 
 
+def reason_menu(width: int) -> list[str]:
+    """The four kinds of wrong, drawn over the card the way a typed line is."""
+    out = [f"  {sgr(179)}why is this card suspect?{C['reset']}", ""]
+    for n, (_key, label, gloss) in enumerate(FLAG_REASONS, 1):
+        room = max(10, width - 26)
+        out.append(f"    {sgr(79)}{n}{C['reset']}  {label:<20}"
+                   f"{C['dim']}{one_line(gloss, room)}{C['reset']}")
+    return out + ["", f"  {C['dim']}1-{len(FLAG_REASONS)} pick · enter skip{C['reset']}"]
+
+
+def pick_reason(draw) -> str:
+    """Which kind of wrong, in one keypress. "" when it is skipped.
+
+    Skippable on purpose: a category makes a flag easier for an update to act on, but an
+    uncategorised flag still beats the reader deciding it is not worth the ceremony.
+    """
+    draw()
+    key = read_key()
+    for n, (name, _label, _gloss) in enumerate(FLAG_REASONS, 1):
+        if key == str(n):
+            return name
+    return ""
+
+
 def answer_field(kind: str, buf: str | None, width: int) -> list[str]:
     """The field as it rests, or as it is being typed into. `buf` is None until you start."""
     label, hint = FIELD.get(kind, FIELD["recall"])
@@ -1825,6 +1948,10 @@ def run_session(queue: list[tuple], mode: str = "test") -> int:
     checked: dict[int, list] = {}
     tabs: dict[int, int] = {}
     trouble: dict[int, str] = {}
+    # Flags are written to the feedback log at the end, not on the keypress, so a flag
+    # raised and taken back in the same session leaves no trace of either.
+    raised: dict[tuple[str, str], tuple[dict, dict]] = {}
+    withdrawn: set[tuple[str, str]] = set()
     i = 0
 
     save_prefs(mode=mode)
@@ -1852,15 +1979,25 @@ def run_session(queue: list[tuple], mode: str = "test") -> int:
             elif key == "f":
                 # Not a grade. "I could not answer this" and "this card is no longer true"
                 # are different facts, and only the second one is worth an update's time.
+                ident = (entry["name"], card["id"])
                 if cs.pop("flagged", None) is None:
                     cs["flagged"] = today().isoformat()
                     # Raised first, asked about second: an abandoned prompt must not lose the
                     # flag, which is the part that matters.
-                    note = read_line("why?", lambda buf: redraw({"label": "why?", "buf": buf}))
+                    if reason := pick_reason(lambda: redraw({"reasons": True})):
+                        cs["flag_reason"] = reason
+                    note = read_line("detail?", lambda buf: redraw({"label": "detail?", "buf": buf}))
                     if note:
                         cs["flag_note"] = note
+                    withdrawn.discard(ident)
+                    raised[ident] = (card, cs)
                 else:
                     cs.pop("flag_note", None)
+                    cs.pop("flag_reason", None)
+                    # Taking back a flag from an earlier session is itself worth recording:
+                    # the log would otherwise show an objection that nobody ever answered.
+                    if raised.pop(ident, None) is None:
+                        withdrawn.add(ident)
                 dirty[entry["name"]] = state
             elif key in ("up", "down") and (mode == "learn" or i in revealed):
                 # Cards move on the horizontal, a card's own faces on the vertical.
@@ -1927,7 +2064,7 @@ def run_session(queue: list[tuple], mode: str = "test") -> int:
             sys.stdout.write(ALT_OFF)
             sys.stdout.flush()
 
-    return finish_session(queue, graded, dirty)
+    return finish_session(queue, graded, dirty, raised, withdrawn)
 
 
 def one_line(text: str, width: int) -> str:
@@ -2028,7 +2165,7 @@ KEYS = [
     ("/", "type your answer: marked for cloze, order and locate,", "test"),
     ("", "measured against the card's words for prose", "test"),
     ("1-9", "open that route in $EDITOR, $PAGER or less", "both"),
-    ("f", "flag the card as suspect, and say why", "both"),
+    ("f", "flag the card as suspect: pick what is wrong with it, add detail", "both"),
     ("e", "your own note on this card", "both"),
     ("q", "stop here; everything graded so far is kept", "both"),
 ]
@@ -2186,7 +2323,9 @@ def draw_card(queue, i, kind, root, cs, revealed, grade, mode="test", typing=Non
             body += render_why(card, _deck, cs, _churn, text_width)
         else:
             body += [wrap(str(card.get("q", "")), text_width, "  ", style=C["bold"])]
-    if typing and typing.get("label"):
+    if typing and typing.get("reasons"):
+        body += [""] + reason_menu(text_width)
+    elif typing and typing.get("label"):
         # The flag's detail and a note are typed on either face, so they sit under whatever
         # is there rather than in the card's own field.
         body += ["", typed_line(typing["label"], typing["buf"], text_width)]
@@ -2223,7 +2362,9 @@ def hard_break(text: str, width: int) -> list[str]:
     return [text[i:i + width] for i in range(0, len(text), width)] or [""]
 
 
-def finish_session(queue, graded: dict[int, str], dirty: dict[str, dict] | None = None) -> int:
+def finish_session(queue, graded: dict[int, str], dirty: dict[str, dict] | None = None,
+                   raised: dict[tuple[str, str], tuple[dict, dict]] | None = None,
+                   withdrawn: set[tuple[str, str]] | None = None) -> int:
     # A deck with a flag raised but nothing graded still has to be written out.
     touched: dict[str, dict] = dict(dirty or {})
     right = wrong = 0
@@ -2246,6 +2387,12 @@ def finish_session(queue, graded: dict[int, str], dirty: dict[str, dict] | None 
         cs["due"] = (today() + dt.timedelta(days=INTERVALS[cs["box"]])).isoformat()
     for name, state in touched.items():
         save_state(name, state)
+    # The permanent half of a flag. state.json carries the live one until an update deals
+    # with it; this is the record that outlives the card, the deck and the regenerate.
+    for name, card_id in sorted(withdrawn or ()):
+        resolve_feedback(name, {card_id}, "withdrawn")
+    for (name, _cid), (card, cs) in (raised or {}).items():
+        append_feedback(name, card, cs)
 
     flagged = {cid for _n, st in touched.items() for cid, cs in st.items() if cs.get("flagged")}
     total = right + wrong
@@ -2261,6 +2408,9 @@ def finish_session(queue, graded: dict[int, str], dirty: dict[str, dict] | None 
         print(f"{sgr(179)}⚑{C['reset']} {len(flagged)} card(s) flagged as suspect. "
               f"{C['dim']}They are the first thing{C['reset']} /repo-cards:update"
               f"{C['dim']} looks at, and repo-cards flags lists them.{C['reset']}")
+    if raised:
+        print(f"{C['dim']}Kept for good in the feedback log, which a regenerate reads before "
+              f"it writes: repo-cards feedback{C['reset']}")
     stale = sorted({e["name"] for e, *_ in queue
                     if (d := deck_summary(e)) and d.get("behind")})
     if stale:
@@ -2446,8 +2596,10 @@ def drift_facts(entry: dict) -> dict:
     # Raised by hand during review, so it holds whatever the shas say: the reader met the
     # card and did not believe it. git cannot produce this signal and neither can the deck.
     state = load_state(entry["name"])
-    f["flagged"] = [(c, state[c["id"]]["flagged"], state[c["id"]].get("flag_note", ""))
+    f["flagged"] = [(c, state[c["id"]]["flagged"], state[c["id"]].get("flag_reason", ""),
+                     state[c["id"]].get("flag_note", ""))
                     for c in cards if state.get(c["id"], {}).get("flagged")]
+    f["resolved"] = sum(1 for e in read_feedback(entry["name"]) if e.get("resolved"))
     # The other half of the signal review generates. A card nobody can hold on to is a
     # defect in the writing, and until now that was visible in `stats` and acted on by
     # nobody: an update that only ever answers to git never fixes a badly written card.
@@ -2592,12 +2744,16 @@ def print_drift_detail(f: dict) -> None:
                   f"verifying this card by card.{C['reset']}")
     if f["flagged"]:
         print(f"\n--- cards you flagged during review ({len(f['flagged'])}) : VERIFY THESE FIRST ---")
-        for c, when, note in f["flagged"]:
-            print(f"  {c['id']:<40} flagged {when}  {c.get('anchor', '')}")
+        for c, when, reason, note in f["flagged"]:
+            print(f"  {c['id']:<40} flagged {when}  "
+                  f"{REASON_LABEL.get(reason, 'no reason given')}  {c.get('anchor', '')}")
             if note:
                 # The reader's own words about what is wrong, which is the whole reason the
                 # flag beats a diff: it says what to look for, not just where.
                 print(f"  {'':<40} \"{note}\"")
+        if f["resolved"]:
+            print(f"  ({f['resolved']} earlier flag(s) already dealt with: repo-cards feedback "
+                  f"--repo {f['name']})")
     if f["sticky"]:
         print(f"\n--- cards missed {STICKY_LAPSES}+ times ({len(f['sticky'])}) : REWRITE THESE ---")
         for c, n in f["sticky"]:
@@ -2883,6 +3039,14 @@ def cmd_adopt(args) -> int:
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 src.replace(dest)
                 carried = ", note carried"
+            # The feedback log follows the rename for the same reason the box does: what a
+            # reader objected to is about the card, not about the string naming it.
+            log = read_feedback(args.repo)
+            if hits := [e for e in log if e.get("card") == old]:
+                for e in hits:
+                    e["card"] = new
+                write_feedback(args.repo, log)
+                carried += f", {len(hits)} flag(s) carried"
             print(f"{C['green']}{old} -> {new}{C['reset']}  "
                   f"{C['dim']}box {state[new].get('box', 1)} kept{carried}{C['reset']}")
             moved += 1
@@ -3164,7 +3328,8 @@ def cmd_flags(args) -> int:
 
     Clearing lives here rather than in the skill because state.json is the one file an
     update must never hand-edit: a flag sits beside the review box, and a careless rewrite
-    of that file costs every card's history.
+    of that file costs every card's history. It is also where an update says what it did,
+    which is the half of the feedback log the reader cannot write.
     """
     width = min(shutil.get_terminal_size((90, 24)).columns, 96)
     total = cleared = 0
@@ -3181,31 +3346,87 @@ def cmd_flags(args) -> int:
         if not rows:
             continue
         if args.clear:
+            outcome = args.outcome or "unspecified"
+            resolve_feedback(entry["name"], {c["id"] for c in rows}, outcome)
             for c in rows:
                 state[c["id"]].pop("flagged", None)
+                state[c["id"]].pop("flag_reason", None)
+                state[c["id"]].pop("flag_note", None)
                 cleared += 1
             save_state(entry["name"], state)
             continue
         print(f"\n{C['bold']}{entry['name']}{C['reset']}")
         for c in rows:
             cs = state[c["id"]]
+            reason = REASON_LABEL.get(cs.get("flag_reason", ""), "no reason given")
             print(f"  {sgr(179)}⚑{C['reset']} {c['id']:<38} {C['dim']}flagged {cs['flagged']} · "
-                  f"box {cs.get('box', 1)} · {c.get('anchor', '')}{C['reset']}")
+                  f"{reason} · box {cs.get('box', 1)} · {c.get('anchor', '')}{C['reset']}")
             if note := cs.get("flag_note"):
                 print(wrap(f"\u201c{note}\u201d", width, "      ", style=sgr(179)))
             print(wrap(str(c.get("q", "")), width, "      ", style=C["dim"]))
         total += len(rows)
 
     if args.clear:
-        print(f"{C['green']}cleared {cleared} flag(s){C['reset']}" if cleared
-              else f"{C['dim']}nothing to clear{C['reset']}")
+        if not cleared:
+            print(f"{C['dim']}nothing to clear{C['reset']}")
+            return 0
+        print(f"{C['green']}cleared {cleared} flag(s){C['reset']}"
+              + (f" {C['dim']}· recorded as {args.outcome}{C['reset']}" if args.outcome else ""))
+        if not args.outcome:
+            print(f"{C['dim']}--outcome {'|'.join(OUTCOMES)} records what you did about them, "
+                  f"which is what makes the log worth reading later.{C['reset']}")
         return 0
     if not total:
         print(f"{C['green']}No cards flagged.{C['reset']} "
               f"{C['dim']}Press f on a card you do not believe during review.{C['reset']}")
         return 0
     print(f"\n{C['dim']}{total} flagged. Ask Claude for{C['reset']} /repo-cards:update"
-          f"{C['dim']}, then: repo-cards flags --clear{C['reset']}\n")
+          f"{C['dim']}, then: repo-cards flags --clear --outcome rewritten{C['reset']}\n")
+    return 0
+
+
+def cmd_feedback(args) -> int:
+    """Every flag ever raised on a deck, and what was done about it.
+
+    The point of keeping this is that a deck can learn from it: the reasons a reader gave
+    are the only record of what this deck gets wrong that is not derivable from the repo,
+    so a regenerate reads it before writing a card on the same ground twice.
+    """
+    width = min(shutil.get_terminal_size((90, 24)).columns, 96)
+    shown = 0
+    for entry in load_registry():
+        if args.repo and entry["name"] != args.repo:
+            continue
+        entries = read_feedback(entry["name"])
+        if args.open:
+            entries = [e for e in entries if not e.get("resolved")]
+        if not entries:
+            continue
+        print(f"\n{C['bold']}{entry['name']}{C['reset']} {C['dim']}· {len(entries)} flag(s) "
+              f"· {feedback_path(entry['name'])}{C['reset']}")
+        for e in sorted(entries, key=lambda x: str(x.get("raised", "")), reverse=True):
+            mark = f"{C['dim']}✓{C['reset']}" if e.get("resolved") else f"{sgr(179)}⚑{C['reset']}"
+            reason = REASON_LABEL.get(str(e.get("reason", "")), "no reason given")
+            print(f"  {mark} {C['dim']}{e.get('raised', '')}{C['reset']}  "
+                  f"{sgr(179)}{reason:<20}{C['reset']}{e.get('card', '')}")
+            if note := e.get("note"):
+                print(wrap(f"\u201c{note}\u201d", width, "      ", style=C["dim"]))
+            print(wrap(str(e.get("q", "")), width, "      ", style=C["dim"]))
+            if e.get("resolved"):
+                print(f"      {C['dim']}→ {e.get('outcome', 'unspecified')} "
+                      f"{e['resolved']}{C['reset']}")
+        shown += len(entries)
+        tally = collections.Counter(str(e.get("reason", "")) for e in entries)
+        if summary := " · ".join(f"{n} {REASON_LABEL.get(k, 'uncategorised')}"
+                                 for k, n in tally.most_common()):
+            print(f"  {C['dim']}{summary}{C['reset']}")
+
+    if not shown and args.open:
+        print(f"{C['green']}No flag left open.{C['reset']} "
+              f"{C['dim']}Everything ever raised is still in: repo-cards feedback{C['reset']}")
+    elif not shown:
+        print(f"{C['dim']}No feedback recorded yet. Press f on a card you do not believe "
+              f"during review, and it is kept here for good.{C['reset']}")
     return 0
 
 
@@ -3304,8 +3525,11 @@ def cmd_import(args) -> int:
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(src.read_text())
     notes = src.parent / "notes"
+    merged = 0
     if notes.is_dir():
+        mine = read_feedback(name)
         shutil.copytree(notes, deck_dir(name) / "notes", dirs_exist_ok=True)
+        merged = merge_feedback(name, mine)
 
     print(f"{C['green']}imported {len(cards)} card(s) as {name}{C['reset']} -> {target}")
     if kept:
@@ -3313,6 +3537,8 @@ def cmd_import(args) -> int:
     if orphaned:
         print(f"  {C['yellow']}{len(orphaned)} state entr(ies) no longer match a card{C['reset']}"
               f"  {C['dim']}repo-cards check --repo {name}{C['reset']}")
+    if merged:
+        print(f"  {merged} flag(s) you had raised yourself were folded back into the feedback log")
     problems = [x for x in check_deck(entry, deck, cards) if x[0] == "error"]
     if problems:
         print(f"  {C['yellow']}{len(problems)} error(s) against this checkout{C['reset']}"
@@ -3379,6 +3605,7 @@ def cmd_home(args) -> int:
     print(f"decks:     {d}/<name>/deck.yaml")
     print(f"state:     {d}/<name>/state.json")
     print(f"notes:     {d}/<name>/notes/")
+    print(f"feedback:  {d}/<name>/notes/feedback.jsonl")
     print(f"\n{C['dim']}Override with REPO_CARDS_HOME, or XDG_DATA_HOME on any platform.{C['reset']}")
     return 0
 
@@ -3388,7 +3615,7 @@ def main() -> int:
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("command", nargs="?", default="review",
                    choices=["review", "test", "learn", "brief", "topics", "stats", "list",
-                            "drift", "flags", "catchup", "check", "adopt", "export",
+                            "drift", "flags", "feedback", "catchup", "check", "adopt", "export",
                             "import", "register", "forget", "repos", "home"])
     p.add_argument("path", nargs="?",
                    help="for `register`: repo root. for `forget`: the name. for `flags`: a card id. "
@@ -3407,6 +3634,9 @@ def main() -> int:
                    help="skip the interactive picker and review everything due")
     p.add_argument("--full", action="store_true", help="for `drift`: full detail for every repo, not a summary")
     p.add_argument("--clear", action="store_true", help="for `flags`: clear them, once an update has dealt with them")
+    p.add_argument("--outcome", choices=list(OUTCOMES),
+                   help="for `flags --clear`: what you did about them, kept in the feedback log")
+    p.add_argument("--open", action="store_true", help="for `feedback`: only flags nothing has dealt with yet")
     p.add_argument("--since", help="for `catchup`: look back to this date instead of your last review")
     p.add_argument("--out", help="for `export`: write here (a .yaml file, or a directory that also takes notes/)")
     p.add_argument("--force", action="store_true", help="for `import`: replace an existing deck")
@@ -3422,6 +3652,7 @@ def main() -> int:
     return {
         "review": cmd_review, "brief": cmd_brief, "topics": cmd_topics,
         "stats": cmd_stats, "list": cmd_list, "drift": cmd_drift, "flags": cmd_flags,
+        "feedback": cmd_feedback,
         "catchup": cmd_catchup, "check": cmd_check, "adopt": cmd_adopt,
         "export": cmd_export, "import": cmd_import,
         "register": cmd_register, "forget": cmd_forget, "repos": cmd_repos, "home": cmd_home,

@@ -5,6 +5,8 @@ session's logic and not of raw mode.
 """
 from __future__ import annotations
 
+import argparse
+
 import pytest
 
 
@@ -29,32 +31,102 @@ def session(rc, repo, deck_factory, card, monkeypatch):
 
 
 def test_f_flags_without_grading(rc, session, card):
-    state = session([card("a", anchor="src/mod.py#alpha")], ["f", "q"])
+    state = session([card("a", anchor="src/mod.py#alpha")], ["f", "1", "q"])
     assert state["a"]["flagged"] == rc.today().isoformat()
     assert state["a"]["seen"] == 0
 
 
-def test_a_flag_carries_the_reason_you_gave(rc, session, card):
-    state = session([card("a", anchor="src/mod.py#alpha")], ["f", "q"],
+def test_a_flag_carries_the_reason_you_picked(rc, session, card):
+    state = session([card("a", anchor="src/mod.py#alpha")], ["f", "2", "q"])
+    assert state["a"]["flag_reason"] == "wrong"
+
+
+def test_a_skipped_reason_still_leaves_the_flag(rc, session, card):
+    """A category makes a flag easier to act on. Refusing to pick one must not cost the flag."""
+    state = session([card("a", anchor="src/mod.py#alpha")], ["f", "enter", "q"])
+    assert state["a"]["flagged"]
+    assert "flag_reason" not in state["a"]
+
+
+def test_a_flag_carries_the_detail_you_gave(rc, session, card):
+    state = session([card("a", anchor="src/mod.py#alpha")], ["f", "1", "q"],
                     lines=["rendered in the worker now"])
     assert state["a"]["flag_note"] == "rendered in the worker now"
 
 
 def test_an_abandoned_prompt_still_leaves_the_flag(rc, session, card):
     """The flag is the part that matters, so it is raised before the question is asked."""
-    state = session([card("a", anchor="src/mod.py#alpha")], ["f", "q"], lines=[""])
+    state = session([card("a", anchor="src/mod.py#alpha")], ["f", "1", "q"], lines=[""])
     assert state["a"]["flagged"]
     assert "flag_note" not in state["a"]
 
 
-def test_flagging_twice_clears_the_note_with_the_flag(rc, session, card):
-    state = session([card("a", anchor="src/mod.py#alpha")], ["f", "f", "q"], lines=["wrong"])
+def test_flagging_twice_clears_the_reason_and_the_note_with_it(rc, session, card):
+    state = session([card("a", anchor="src/mod.py#alpha")], ["f", "1", "f", "q"], lines=["wrong"])
     assert state == {}
 
 
 def test_a_flag_raised_in_learn_mode_is_kept(rc, session, card):
-    state = session([card("a", anchor="src/mod.py#alpha")], ["f", "q"], mode="learn")
+    state = session([card("a", anchor="src/mod.py#alpha")], ["f", "1", "q"], mode="learn")
     assert state["a"]["flagged"]
+
+
+class TestFeedbackLog:
+    """The permanent half of a flag: what gets kept once an update has cleared it."""
+
+    def test_a_raised_flag_is_written_to_the_log(self, rc, session, card):
+        session([card("a", anchor="src/mod.py#alpha")], ["f", "1", "q"],
+                lines=["rendered in the worker now"])
+        [entry] = rc.read_feedback("repo")
+        assert entry["card"] == "a"
+        assert entry["reason"] == "stale"
+        assert entry["note"] == "rendered in the worker now"
+        assert "resolved" not in entry
+
+    def test_an_entry_carries_the_card_with_it(self, rc, session, card):
+        """Self-contained on purpose: the update that reads this often retires the card."""
+        session([card("a", anchor="src/mod.py#alpha")], ["f", "1", "q"])
+        [entry] = rc.read_feedback("repo")
+        assert entry["q"] == "Why a?"
+        assert entry["anchor"] == "src/mod.py#alpha"
+
+    def test_a_flag_taken_back_in_the_same_session_is_never_logged(self, rc, session, card):
+        session([card("a", anchor="src/mod.py#alpha")], ["f", "1", "f", "q"])
+        assert rc.read_feedback("repo") == []
+
+    def test_taking_back_an_older_flag_resolves_its_entry(self, rc, session, card):
+        rc.write_feedback("repo", [{"card": "a", "raised": "2026-09-01", "reason": "stale",
+                                    "note": "", "q": "Why a?", "anchor": "src/mod.py#alpha"}])
+        session([card("a", anchor="src/mod.py#alpha")], ["f", "q"],
+                state={"a": {"box": 1, "due": "2026-01-01", "seen": 1, "lapses": 0,
+                             "flagged": "2026-09-01"}})
+        [entry] = rc.read_feedback("repo")
+        assert entry["outcome"] == "withdrawn"
+
+    def test_clearing_records_what_the_update_did(self, rc, session, card):
+        session([card("a", anchor="src/mod.py#alpha")], ["f", "1", "q"])
+        args = argparse.Namespace(repo="repo", path=None, clear=True, outcome="rewritten")
+        assert rc.cmd_flags(args) == 0
+        [entry] = rc.read_feedback("repo")
+        assert (entry["outcome"], entry["resolved"]) == ("rewritten", rc.today().isoformat())
+        assert "flagged" not in rc.load_state("repo").get("a", {})
+
+    def test_the_log_outlives_a_cleared_flag(self, rc, session, card):
+        """The whole point: state.json forgets, this does not."""
+        session([card("a", anchor="src/mod.py#alpha")], ["f", "3", "q"], lines=["a grep answers it"])
+        rc.cmd_flags(argparse.Namespace(repo="repo", path=None, clear=True, outcome="retired"))
+        [entry] = rc.read_feedback("repo")
+        assert (entry["reason"], entry["note"]) == ("useless", "a grep answers it")
+
+    def test_an_import_keeps_the_flags_you_raised_yourself(self, rc, tmp_path, session, card):
+        session([card("a", anchor="src/mod.py#alpha")], ["f", "1", "q"])
+        theirs = tmp_path / "theirs"
+        (theirs / "notes").mkdir(parents=True)
+        rc.deck_path("repo").rename(theirs / "deck.yaml")
+        (theirs / "notes" / "feedback.jsonl").write_text(
+            '{"card": "b", "raised": "2026-08-01", "reason": "unclear"}\n')
+        assert rc.cmd_import(argparse.Namespace(path=str(theirs), name="repo", force=True)) == 0
+        assert sorted(e["card"] for e in rc.read_feedback("repo")) == ["a", "b"]
 
 
 def test_a_regrade_replaces_rather_than_repeats(rc, session, card):
@@ -275,8 +347,20 @@ class TestCardNotes:
         rc.deck_path("repo").write_text('{"repo": "repo", "cards": []}')
         assert rc.read_card_note("repo", "a") == "mine"
 
+    def test_adopt_carries_the_feedback_to_the_new_id(self, rc, repo, deck_factory, card):
+        """A rename must not orphan what a reader objected to, for the same reason it must
+        not orphan the box."""
+        repo.write("src/mod.py", "def alpha():\n    return 1\n")
+        repo.commit("init")
+        deck_factory(repo, [card("alpha-is-always-one", anchor="src/mod.py#alpha")])
+        rc.save_state("repo", {"alpha-is-one": {"box": 3, "due": "2026-10-01", "seen": 2, "lapses": 0}})
+        rc.write_feedback("repo", [{"card": "alpha-is-one", "raised": "2026-09-01",
+                                    "reason": "unclear", "note": "two facts"}])
+
+        rc.cmd_adopt(argparse.Namespace(repo="repo", path="alpha-is-one=alpha-is-always-one"))
+        assert [e["card"] for e in rc.read_feedback("repo")] == ["alpha-is-always-one"]
+
     def test_adopt_carries_the_note_to_the_new_id(self, rc, repo, deck_factory, card):
-        import argparse
         repo.write("src/mod.py", "def alpha():\n    return 1\n")
         repo.commit("init")
         deck_factory(repo, [card("alpha-is-always-one", anchor="src/mod.py#alpha")])

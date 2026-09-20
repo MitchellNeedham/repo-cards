@@ -29,10 +29,14 @@ Then, in this order:
 
 1. **Start with the flagged cards.** `repo-cards drift` lists them first, under *cards you flagged
    during review*. They were marked with `f` by somebody who met the card and did not believe it,
-   which beats any diff as a signal. **Read the quoted note under each one**: it is the reader's own
-   account of what is wrong, and it usually names the thing to go and read. Verify, rewrite or
-   retire each one, then clear them with `repo-cards flags --clear --repo <name>` so the next pass
-   does not re-read them.
+   which beats any diff as a signal. Each carries one of four reasons (*not true any more*, *never
+   was true*, *not useful*, *badly asked*) and usually a quoted note. **Read both**: the reason says
+   what is being asked of you (re-read the anchor, rewrite the question, retire it outright), and
+   the note is the reader's own account of what is wrong, which usually names the thing to go and
+   read. Verify, rewrite or retire each one, then clear it with what you did:
+   `repo-cards flags --clear --repo <name> <card-id> --outcome rewritten|retired|kept`. Clear per
+   card so each outcome is true. That record is kept for good and a later regenerate reads it, so
+   an unrecorded outcome is feedback thrown away.
 2. **Rewrite what keeps being missed.** `drift` lists cards missed three or more times under
    *cards missed 3+ times*. That is a defect in the writing, not a hard fact: split it, or make the
    question answerable rather than recognisable. This is the only step that improves a card's

@@ -93,11 +93,13 @@ def test_flags_and_lapses_reach_the_report(rc, two_symbols, deck_factory, card):
     entry = deck_factory(two_symbols, [card("a", anchor="src/mod.py#alpha"),
                                        card("b", anchor="src/mod.py#beta")])
     rc.save_state(entry["name"], {
-        "a": {"box": 1, "due": "2026-01-01", "seen": 1, "lapses": 0, "flagged": "2026-09-17"},
+        "a": {"box": 1, "due": "2026-01-01", "seen": 1, "lapses": 0, "flagged": "2026-09-17",
+              "flag_reason": "stale"},
         "b": {"box": 1, "due": "2026-01-01", "seen": 9, "lapses": rc.STICKY_LAPSES},
     })
     f = rc.drift_facts(entry)
-    assert [c["id"] for c, _when, _note in f["flagged"]] == ["a"]
+    assert [c["id"] for c, _when, _reason, _note in f["flagged"]] == ["a"]
+    assert [r for _c, _when, r, _note in f["flagged"]] == ["stale"]
     assert [c["id"] for c, _n in f["sticky"]] == ["b"]
 
 

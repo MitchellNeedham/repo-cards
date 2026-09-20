@@ -174,19 +174,57 @@ used:
 All of it was already being computed and none of it was ever shown. The panel is built from the
 same parts the sort is, so it cannot drift from the ordering it explains.
 
-**`f` flags a card you do not believe**, and asks why. "I forgot this" and "this is not true any
-more" are different facts and only the second one is a defect, so a flag grades nothing:
+**`f` flags a card you do not believe**, and asks what is wrong with it. "I forgot this" and "this
+is not true any more" are different facts and only the second one is a defect, so a flag grades
+nothing:
 
 ```
     ADR-7: enqueue writes an empty payload. Why is the outbox row blank,
     and what does that make it?
 
-    why? rendered in the worker now, not at send time█
+    why is this card suspect?
+
+      1  not true any more   the repo moved on
+      2  never was true      wrong when it was written
+      3  not useful          trivial, or a grep answers it
+      4  badly asked         vague, two facts, unanswerable
+
+    1-4 pick · enter skip
 ```
+
+Then a line of your own, which is where the useful part usually is: *rendered in the worker now,
+not at send time*. The four reasons are not decoration. "The repo moved on" is a fact to go and
+re-read; "this was never true" is a card the generator should not have written, and an update owes
+them different things. Picking one is optional, because a flag nobody could be bothered to
+categorise still beats no flag at all.
 
 It lands at the top of the next `drift`, in your own words, and is the first thing an update looks
 at. That is how review feeds the deck rather than only consuming it, and it catches what git
 cannot: a card that was wrong the day it was written.
+
+**Flags are kept after they are dealt with.** Clearing one removes it from the queue, not from the
+record: every flag ever raised stays in `notes/feedback.jsonl` with its reason, your words, and
+what the update did about it (`rewritten`, `retired`, `kept`, or `withdrawn` if you took it back
+yourself). `repo-cards feedback` reads it back.
+
+```
+$ repo-cards feedback --repo billing
+
+  billing · 6 flag(s) · <data home>/billing/notes/feedback.jsonl
+  ⚑ 2026-09-17  not true any more   adr-7-outbox-empty-payload
+      “rendered in the worker now, not at send time”
+      ADR-7: enqueue writes an empty payload. Why is the outbox row blank?
+  ✓ 2026-08-02  badly asked         retry-budget-per-attempt
+      “two facts in one question, I can never answer both”
+      What is the retry budget, and when does the backoff reset?
+      → rewritten 2026-08-04
+  3 not true any more · 2 badly asked · 1 not useful
+```
+
+That list is the only record of what a deck gets wrong that cannot be derived from the repo, so a
+regenerate reads it before writing a single card. Six months of flags is six months of knowing
+which questions this codebase asks badly, and the deck you get back is shaped by them. The more you
+flag, the better the cards get.
 
 **`e` keeps your own note on a card**, in `$EDITOR` or as a typed line. The deck says what the repo
 decided; the note says what it cost you, which is why it lives beside the deck rather than in it.
@@ -308,7 +346,8 @@ $ repo-cards drift
 | `adopt OLD=NEW` | give a renamed card the old id's review history |
 | `export --repo N` `import PATH` | hand a deck to somebody else, keeping your own progress |
 | `catchup` `--since D` | what moved since you last reviewed, read-only |
-| `flags` `flags --clear` | cards you marked suspect during review, and clearing them |
+| `flags` `flags --clear --outcome O` | cards you marked suspect during review, and clearing them with what you did |
+| `feedback` `--open` | every flag ever raised and how it was resolved, which a regenerate learns from |
 | `register PATH` `forget NAME` `repos` `home` | the registry, and where things live |
 
 ## Where data lives
@@ -326,6 +365,7 @@ everywhere, and `repo-cards home` prints what it resolved.
     deck.yaml         the cards. Content only, and portable
     state.json        Leitner state, keyed by card id
     notes/            long-form notes, which topics can point at
+      feedback.jsonl  every flag ever raised, and what was done about it
 ```
 
 Portable is meant literally. `repo-cards export --repo billing --out ./billing-deck` writes the
@@ -354,6 +394,10 @@ boxes, so importing a colleague's deck costs you nothing you had learned.
 - **Review feeds the deck, not just the schedule.** A flag raised during review and a card missed
   three times running both land in `drift`, so an update fixes what the reading is telling you as
   well as what the commits are.
+- **Feedback is kept, not consumed.** A flag survives the update that clears it, the card it was
+  raised against and the regenerate that replaces the deck, because the categories and the words
+  you gave are the only account of what this deck gets wrong that git cannot supply. Generation
+  reads them, which is what makes flagging compound rather than a chore.
 - **Churn is measured, not declared.** A card whose anchor was edited twenty times this year
   outranks one pointing at a decision nobody has revisited in three.
 - **Priority is weighted, with a starvation guard.** A card's score also falls the longer it stays
