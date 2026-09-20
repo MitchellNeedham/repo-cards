@@ -80,6 +80,16 @@ class TestChecking:
         card = {"id": "c", "a": "Written {{in the same transaction}}."}
         assert not rc.check_answer(card, "cloze", ["later"])[0]
 
+    def test_a_short_blank_tolerates_a_typo_as_well(self, rc):
+        """0.85 is a different rule at every length: it forgives two letters of
+        `authoritative` and nothing at all of `box`, where one slip scores 0.67."""
+        card = {"id": "c", "a": "A card sits in a {{box}}."}
+        assert rc.check_answer(card, "cloze", ["bxo"])[0]
+
+    def test_two_letters_are_too_short_to_have_a_typo(self, rc):
+        """`in` and `on` are one edit apart and mean different things."""
+        assert not rc.close_enough("in", "on")
+
     def test_every_blank_has_to_be_right(self, rc):
         card = {"id": "c", "a": "The ledger is {{authoritative}}; written {{in one transaction}}."}
         ok, parts = rc.check_answer(card, "cloze", ["authoritative", "whenever"])
@@ -162,6 +172,16 @@ class TestOverlapHint:
 
     def test_nothing_in_common_scores_zero(self, rc):
         assert rc.word_overlap("no idea at all", self.ANSWER) == 0.0
+
+    def test_a_typo_counts_as_the_word(self, rc):
+        """A hint that lists `transacton` among the words you did not say is about spelling."""
+        assert rc.word_overlap("the projection is written in one transacton",
+                               "the projection is written in one transaction") == 1.0
+
+    def test_a_short_answer_is_measured_even_with_nothing_to_count(self, rc):
+        """Every word a stopword, so there are no content words: scoring it zero would say
+        the reader produced none of an answer they typed exactly."""
+        assert rc.word_overlap("it is the one", "it is the one") == 1.0
 
     def test_a_crude_stem_lets_versions_meet_versioned(self, rc):
         assert rc.word_overlap("versions", "the handshake is versioned") > 0

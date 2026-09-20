@@ -209,7 +209,10 @@ you which word belongs there:
     marked from what you typed · y or n overrides
 ```
 
-A typo passes, a different word does not, and the mark moves the box like any other grade.
+A typo passes, a different word does not, and the mark moves the box like any other grade. The
+bar moves with the word rather than being one ratio for all of them: `0.85` forgives two letters of
+`authoritative` and nothing at all of `box`, where a single slip scores `0.67`, so short blanks are
+held to one edit instead.
 
 On a **prose** card `t` measures instead of marking, and names the words you did not produce:
 
@@ -226,6 +229,10 @@ On a **prose** card `t` measures instead of marking, and names the words you did
     you did not say: makes, message, prompt, snapshot, invoice,
     rendered, send, time
 ```
+
+The words are matched rather than looked up, so a misspelling counts as having been said: a hint
+that lists `transacton` among the words you did not produce is telling you about your typing, and
+the card is not about that.
 
 You still grade yourself, and that line is drawn on purpose. On a card whose answer is a *why*,
 "blank to save space" and "blank because it is a prompt, not a snapshot" look alike to any string
