@@ -1158,7 +1158,8 @@ def read_key(lower: bool = True) -> str:
         ch = msvcrt.getwch()
         if ch in ("\x00", "\xe0"):
             return {"K": "left", "M": "right", "H": "up", "P": "down"}.get(msvcrt.getwch(), "")
-        named = {"\r": "enter", "\x1b": "esc", "\x03": "q", "\x08": "backspace", "\x7f": "backspace"}
+        named = {"\r": "enter", "\x1b": "esc", "\x03": "q", "\x08": "backspace",
+                 "\x7f": "backspace", "\t": "tab"}
         return named.get(ch) or (ch.lower() if lower else ch)
 
     import select
@@ -1174,7 +1175,7 @@ def read_key(lower: bool = True) -> str:
         ch = os.read(fd, 1).decode("utf-8", "replace")
         if ch != "\x1b":
             named = {"\r": "enter", "\n": "enter", "\x03": "q", "\x04": "q",
-                     "\x7f": "backspace", "\x08": "backspace"}
+                     "\x7f": "backspace", "\x08": "backspace", "\t": "tab"}
             return named.get(ch) or (ch.lower() if lower else ch)
 
         # A bare Escape sends nothing more, so do not block waiting for a sequence.
@@ -1202,26 +1203,34 @@ def prompt(msg: str) -> str:
         return "q"
 
 
-def read_line(label: str, draw=None) -> str:
+def read_line(label: str, draw=None, complete=None) -> str:
     """One line of typed text, inside the alt screen when there is one.
 
     The session owns the screen in fullscreen mode, so `input()` cannot be used: the buffer
     is handed back to `draw` after every keypress and the caller redraws the card around it.
     Piped, it is an ordinary line read, which is what keeps a session scriptable.
+
+    `complete` takes the buffer and returns it grown, with whatever is still ambiguous under
+    it, which `draw` shows beneath the field.
     """
     if not FULLSCREEN or draw is None:
         try:
             return input(f"{label} ").strip()
         except (EOFError, KeyboardInterrupt):
             return ""
-    buf = ""
+    buf, hints = "", ()
     while True:
-        draw(buf)
+        draw(buf, hints)
         key = read_key(lower=False)
         if key == "enter":
             return buf.strip()
         if key == "esc":
             return ""
+        if key == "tab":
+            if complete:
+                buf, hints = complete(buf)
+            continue
+        hints = ()
         if key == "backspace":
             buf = buf[:-1]
         elif len(key) == 1 and key.isprintable():
@@ -1420,13 +1429,51 @@ def route_lines(card: dict, root: Path, width: int) -> list[str]:
 CHECKABLE = ("cloze", "order", "locate")
 
 
+#: Tracked paths per repo, for completing a typed route. One `git ls-files` per repo per
+#: session, because the field redraws on every keypress and a large checkout is thousands
+#: of lines.
+_PATHS: dict[str, list[str]] = {}
+
+
+def repo_paths(root: Path) -> list[str]:
+    if str(root) not in _PATHS:
+        _PATHS[str(root)] = [p for p in git(root, "ls-files").split("\n") if p]
+    return _PATHS[str(root)]
+
+
+def complete_path(buf: str, paths: list[str]) -> tuple[str, tuple[str, ...]]:
+    """Grow the last token towards a real path, and say what is still ambiguous under it.
+
+    One segment per keypress, the way a shell walks a tree. Filling the whole path in would
+    answer the card: the question is where something lives, and the point of tabbing there
+    is to find out whether you know the way.
+    """
+    head, sep, token = buf.rpartition(" ")
+    hits = [p for p in paths if p.startswith(token)]
+    if not hits:
+        return buf, ()
+    grown = os.path.commonprefix(hits)
+    # A directory at a time, even when only one path matches: completing the whole thing
+    # would type the answer for you.
+    if (cut := grown.find("/", len(token))) >= 0:
+        grown = grown[:cut + 1]
+    if len(grown) < len(token):
+        grown = token
+
+    def under(path: str) -> str:
+        segment, slash, _rest = path[len(grown):].partition("/")
+        return segment + slash
+
+    return head + sep + grown, tuple(sorted({under(h) for h in hits if h != grown})[:8])
+
+
 #: The field on the front of a card: its label, and the grey placeholder standing in the
 #: field until you type over it. A card that said nothing about being answerable was only
 #: ever flipped, so the field sits there from the start rather than appearing on a keypress,
 #: and the placeholder is where the key and the shape of the answer are said.
 FIELD = {"recall": ("answer:", "type / to start"),
          "order": ("order:", "type / to start, numbers like 3 1 2 4"),
-         "locate": ("where:", "type / to start, paths separated by spaces"),
+         "locate": ("where:", "type / to start, tab walks to a path"),
          "cloze": ("", "type / to fill the blanks")}
 
 
@@ -1467,7 +1514,7 @@ def pick_reason(draw) -> str:
     return ""
 
 
-def answer_field(kind: str, buf: str | None, width: int) -> list[str]:
+def answer_field(kind: str, buf: str | None, width: int, hints=()) -> list[str]:
     """The field as it rests, or as it is being typed into. `buf` is None until you start."""
     label, hint = FIELD.get(kind, FIELD["recall"])
     if not label:
@@ -1475,7 +1522,10 @@ def answer_field(kind: str, buf: str | None, width: int) -> list[str]:
         return [f"  {C['dim']}{hint}{C['reset']}"] if buf is None else []
     if buf is None:
         return [wrap(f"{sgr(179)}{label}{C['reset']} {C['dim']}{hint}{C['reset']}", width)]
-    return [typed_line(label, buf, width)]
+    out = [typed_line(label, buf, width)]
+    if hints:
+        out.append(wrap("  ".join(hints), width, "    ", style=C["dim"]))
+    return out
 
 
 def check_answer(card: dict, kind: str, typed: list[str]) -> tuple[bool, list[tuple[bool, str, str]]]:
@@ -1986,7 +2036,8 @@ def run_session(queue: list[tuple], mode: str = "test") -> int:
                     # flag, which is the part that matters.
                     if reason := pick_reason(lambda: redraw({"reasons": True})):
                         cs["flag_reason"] = reason
-                    note = read_line("detail?", lambda buf: redraw({"label": "detail?", "buf": buf}))
+                    note = read_line("detail?",
+                                     lambda buf, _h: redraw({"label": "detail?", "buf": buf}))
                     if note:
                         cs["flag_note"] = note
                     withdrawn.discard(ident)
@@ -2026,7 +2077,8 @@ def run_session(queue: list[tuple], mode: str = "test") -> int:
                         trouble.pop(i, None)
             elif key == "e":
                 if not edit_card_note(entry["name"], card["id"]):
-                    line = read_line("note:", lambda buf: redraw({"label": "note:", "buf": buf}))
+                    line = read_line("note:",
+                                     lambda buf, _h: redraw({"label": "note:", "buf": buf}))
                     if line:
                         append_card_note(entry["name"], card["id"], line)
             elif key == "/" and mode == "test" and i not in revealed:
@@ -2037,10 +2089,16 @@ def run_session(queue: list[tuple], mode: str = "test") -> int:
                     for n in range(len(CLOZE.findall(str(card.get("a", ""))))):
                         typed.append(read_line(
                             f"blank {n + 1}",
-                            lambda buf, n=n, done=list(typed): redraw({"cloze": (done, n, buf)})))
+                            lambda buf, _h, n=n, done=list(typed):
+                                redraw({"cloze": (done, n, buf)})))
                 else:
-                    typed = [read_line(FIELD.get(kind, FIELD["recall"])[0],
-                                       lambda buf: redraw({"answer": buf}))]
+                    # Only a locate card completes: it is the one whose answer is a path,
+                    # and tabbing to it is how you find out you knew where it lived.
+                    paths = repo_paths(roots[entry["name"]]) if kind == "locate" else []
+                    typed = [read_line(
+                        FIELD.get(kind, FIELD["recall"])[0],
+                        lambda buf, hints: redraw({"answer": buf, "hints": hints}),
+                        (lambda buf, ps=paths: complete_path(buf, ps)) if paths else None)]
                 revealed.add(i)
                 if kind in CHECKABLE:
                     # Short and exact, so the mark is a fact rather than an opinion, and it
@@ -2164,6 +2222,8 @@ KEYS = [
     ("y / n", "got it / missed, which moves the box", "test"),
     ("/", "type your answer: marked for cloze, order and locate,", "test"),
     ("", "measured against the card's words for prose", "test"),
+    ("tab", "walk to a real path, one directory at a time, while", "test"),
+    ("", "answering a locate card", "test"),
     ("1-9", "open that route in $EDITOR, $PAGER or less", "both"),
     ("f", "flag the card as suspect: pick what is wrong with it, add detail", "both"),
     ("e", "your own note on this card", "both"),
@@ -2291,7 +2351,7 @@ def draw_card(queue, i, kind, root, cs, revealed, grade, mode="test", typing=Non
         else:
             body += render_prompt(card, kind, text_width, root)
             body += [""] + answer_field(kind, typing.get("answer") if typing else None,
-                                        text_width)
+                                        text_width, (typing or {}).get("hints") or ())
     else:
         # One dim line of what was asked. You grade yourself against the question, so it
         # cannot leave the screen, but it has done its work and the answer needs the space.

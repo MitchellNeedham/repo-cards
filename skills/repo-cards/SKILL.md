@@ -177,6 +177,12 @@ a: >-
   Optional commentary shown under the correct order.
 ```
 
+**Tab walks to a path while you answer a `locate` card.** It completes the token you are typing
+against the repo's tracked files, one directory per press, and lists what is still ambiguous under
+it. One segment at a time on purpose: filling the whole path in would answer the card, and the
+point is to find out whether you know the way. It is why a `locate` card needs real routes rather
+than a directory name.
+
 A plain recall card carrying two or more routes is also asked as `locate` about one time in six, so
 the variety costs no extra authoring. Reach for an explicit `kind:` when the shape genuinely fits:
 `cloze` for a rule with two or three load-bearing words in it, `order` for a pipeline or lifecycle.

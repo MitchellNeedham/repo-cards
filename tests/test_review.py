@@ -23,7 +23,8 @@ def session(rc, repo, deck_factory, card, monkeypatch):
 
         keys_it, lines_it = iter(keys), iter(lines)
         monkeypatch.setattr(rc, "read_key", lambda lower=True: next(keys_it, "q"))
-        monkeypatch.setattr(rc, "read_line", lambda label, draw=None: next(lines_it, ""))
+        monkeypatch.setattr(rc, "read_line",
+                            lambda label, draw=None, complete=None: next(lines_it, ""))
         monkeypatch.setattr(rc, "draw_card", lambda *a, **k: None)
         rc.run_session(queue, mode)
         return rc.load_state(entry["name"])
@@ -257,7 +258,7 @@ class TestAnswerField:
     def test_a_kind_with_a_shape_says_what_it_wants(self, rc):
         """The placeholder is where `numbers, not words` is said, since the field is always up."""
         assert "numbers" in self.plain(rc, rc.answer_field("order", None, 60))
-        assert "paths" in self.plain(rc, rc.answer_field("locate", None, 60))
+        assert "tab walks to a path" in self.plain(rc, rc.answer_field("locate", None, 60))
 
     def test_a_cloze_has_no_field_because_it_fills_the_sentence(self, rc):
         out = self.plain(rc, rc.answer_field("cloze", None, 60))
@@ -276,6 +277,59 @@ class TestAnswerField:
         out = self.plain(rc, rc.answer_field("locate", "src/" + "billing/" * 12, 50)).split("\n")
         assert all(len(ln) <= 50 for ln in out)
         assert out[-1].endswith("\u2588")
+
+
+class TestWalkingToAPath:
+    """Tab on a locate card: navigation, one segment at a time."""
+
+    PATHS = ("src/billing/outbox.py", "src/billing/retry.py", "src/checkout/cart.py",
+             "docs/adr/adr-7-outbox.md", "README.md")
+
+    def test_tab_advances_one_directory_at_a_time(self, rc):
+        """Not the whole path: filling it in would answer the card."""
+        assert rc.complete_path("src/", self.PATHS)[0] == "src/"
+        assert rc.complete_path("src/b", self.PATHS)[0] == "src/billing/"
+
+    def test_what_is_still_ambiguous_is_offered(self, rc):
+        _buf, hints = rc.complete_path("src/billing/", self.PATHS)
+        assert hints == ("outbox.py", "retry.py")
+
+    def test_even_the_only_match_is_walked_rather_than_filled_in(self, rc):
+        """One tab, one directory, however few paths are left."""
+        assert rc.complete_path("docs", self.PATHS)[0] == "docs/"
+        assert rc.complete_path("docs/", self.PATHS)[0] == "docs/adr/"
+        assert rc.complete_path("docs/adr/", self.PATHS) == ("docs/adr/adr-7-outbox.md", ())
+
+    def test_only_the_last_path_is_completed(self, rc):
+        """A locate answer is several paths, and tab means the one you are typing."""
+        assert rc.complete_path("README.md src/c", self.PATHS)[0] == "README.md src/checkout/"
+
+    def test_a_token_matching_nothing_is_left_alone(self, rc):
+        assert rc.complete_path("nowhere/", self.PATHS) == ("nowhere/", ())
+
+    def test_an_empty_field_offers_the_top_level(self, rc):
+        _buf, hints = rc.complete_path("", self.PATHS)
+        assert hints == ("README.md", "docs/", "src/")
+
+    def test_tab_reaches_the_completer_while_typing(self, rc, monkeypatch):
+        """read_line owns the keys, so the wiring is worth a test of its own."""
+        keys = iter(["s", "r", "c", "/", "tab", "enter"])
+        monkeypatch.setattr(rc, "FULLSCREEN", True)
+        monkeypatch.setattr(rc, "read_key", lambda lower=True: next(keys, "enter"))
+        seen = []
+        got = rc.read_line("where:", lambda buf, hints: seen.append((buf, hints)),
+                           lambda buf: rc.complete_path(buf, self.PATHS))
+        assert got == "src/"
+        assert seen[-1] == ("src/", ("billing/", "checkout/"))
+
+    def test_typing_again_clears_what_was_offered(self, rc, monkeypatch):
+        keys = iter(["s", "tab", "x", "enter"])
+        monkeypatch.setattr(rc, "FULLSCREEN", True)
+        monkeypatch.setattr(rc, "read_key", lambda lower=True: next(keys, "enter"))
+        seen = []
+        rc.read_line("where:", lambda buf, hints: seen.append((buf, hints)),
+                     lambda buf: rc.complete_path(buf, self.PATHS))
+        assert seen[-1][1] == ()
 
 
 class TestOverlapHint:

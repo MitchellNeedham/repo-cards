@@ -17,7 +17,8 @@ import pytest
 
 SCRIPT = Path(__file__).resolve().parent.parent / "bin" / "repo-cards"
 
-_CACHES = ("_CHURN_CACHE", "_TOUCH_CACHE", "_CHANGED", "_CHANGED_SINCE", "_SHA_DATE", "_SHUFFLE")
+_CACHES = ("_CHURN_CACHE", "_TOUCH_CACHE", "_CHANGED", "_CHANGED_SINCE", "_SHA_DATE",
+           "_SHUFFLE", "_PATHS")
 
 
 @pytest.fixture(scope="session")

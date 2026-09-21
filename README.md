@@ -235,6 +235,17 @@ An update rewrites cards and never touches your notes. They show on the card's `
 a sequence, and `locate` asks *where you would look*, treating the routes as the answer. A recall
 card with good routes is asked that way about one time in six.
 
+**On a `locate` card, `tab` walks to a path.** It completes what you are typing against the repo's
+tracked files, one directory per press, and lists what is still ambiguous underneath:
+
+```
+    where: src/billing/█
+      outbox.py  retry.py  sender.py
+```
+
+One segment at a time on purpose. Completing the whole path would answer the card, and the point of
+tabbing there is finding out whether you knew the way.
+
 **Those three can be typed and marked** with `/`, because their answers are short and exact. A
 cloze is filled in place, one blank at a time, because the words either side are most of what tells
 you which word belongs there:
