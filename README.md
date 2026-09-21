@@ -29,10 +29,17 @@ Not a summary. The facts where **being wrong is expensive**. The test applied to
 If the answer is not "a defect, a reopened decision, or a lost hour", it belongs in a document.
 Anything `grep` answers in ten seconds is excluded on purpose.
 
+**About half of a deck is meant to be easy.** The test above says which facts are worth knowing,
+not how hard they should be to answer, and a deck of nothing but deep mechanics is one nobody can
+get into. Half the cards are `level: orientation`: where a new component goes, what the layers are
+called, which side of a boundary owns what. They are what makes a deck usable on the first day
+back. `check` says so when a deck has too few of them.
+
 ```yaml
 - id: outbox-row-is-a-prompt
   tags: [outbox, invariant]
   priority: 1                             # 1 foundational, 2 core (default), 3 detail
+  level: deep                             # orientation, working (default), deep
   anchor: src/billing/outbox.py#enqueue   # where the fact is defined
   look:                                   # how to go and check it yourself
     src/billing/outbox.py#enqueue: the empty payload, and the comment arguing it
@@ -40,9 +47,13 @@ Anything `grep` answers in ten seconds is excluded on purpose.
   q: >-
     ADR-7: enqueue writes an empty payload. Why is the outbox row blank, and what does that make it?
   a: >-
-    It makes the message a prompt, not a snapshot. The row says this invoice changed; the bytes are
-    rendered at send time, so a queued payload would go out stale.
+    A prompt, not a snapshot: the bytes are rendered at send time, so a queued payload would be
+    stale.
 ```
+
+Answers are kept under 100 characters where the fact allows it. One card is one fact, and one fact
+fits on two lines: a long answer is usually two cards, or a card with its reasoning pasted in, and
+the reasoning is what `look` is for.
 
 `priority` decides what a short session spends its time on. `look` is the route you would take to
 answer the question yourself, shown **before** the answer so you can go and check. `anchor` is the

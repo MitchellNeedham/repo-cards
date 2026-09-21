@@ -37,27 +37,31 @@ Then, in this order:
    `repo-cards flags --clear --repo <name> <card-id> --outcome rewritten|retired|kept`. Clear per
    card so each outcome is true. That record is kept for good and a later regenerate reads it, so
    an unrecorded outcome is feedback thrown away.
-2. **Rewrite what keeps being missed.** `drift` lists cards missed three or more times under
+2. **Bring the deck towards the bar as you pass through it.** `check` reports answers past 200
+   characters and decks short of `orientation` cards. Shorten the long answers of every card you
+   touch, towards the 100-character target, and add the easy cards the area is missing while you
+   are already reading it. Cards you do not touch keep what they had.
+3. **Rewrite what keeps being missed.** `drift` lists cards missed three or more times under
    *cards missed 3+ times*. That is a defect in the writing, not a hard fact: split it, or make the
    question answerable rather than recognisable. This is the only step that improves a card's
    quality rather than its currency, so do not skip it because git had nothing to say.
-3. **Verify before adding.** For every card the report flags hot, read the anchor as it is *now* and
+4. **Verify before adding.** For every card the report flags hot, read the anchor as it is *now* and
    decide: still true (leave it, id included), now wrong (rewrite the answer, keep the id so the
    review box survives), or no longer a fact (retire it). **Stamp every card you read with
    `verified: <short HEAD>`**, kept or rewritten, so the next pass measures it from here rather
    than from the deck's baseline and stops re-reading the same hot files.
    **This is the point of the command.** A deck that only grows is a deck that quietly starts lying,
    and a stale card is worse than a missing one because it gets acted on confidently.
-4. **Read the commit messages, not just the diff.** A commit that reverses an earlier decision is
+5. **Read the commit messages, not just the diff.** A commit that reverses an earlier decision is
    the highest-value card in an update, and the card it contradicts must be retired in the same
    pass.
-5. **Then consider new cards** from the uncovered-files list, against the same bar. Most changed
+6. **Then consider new cards** from the uncovered-files list, against the same bar. Most changed
    files warrant no card.
-6. **Fix the topics.** A retired card leaves a dangling id, which `repo-cards topics` flags. A new
+7. **Fix the topics.** A retired card leaves a dangling id, which `repo-cards topics` flags. A new
    card usually belongs in an existing topic; a genuinely new feature area may want its own.
-7. Bump `last_update_sha` to the current short HEAD and `last_update_date` to today. Cards you did
+8. Bump `last_update_sha` to the current short HEAD and `last_update_date` to today. Cards you did
    not reach keep whatever `verified` stamp they had, which is what makes a partial pass honest.
-8. Re-validate with `repo-cards check --repo <name>`, then report: verified, rewritten, retired,
+9. Re-validate with `repo-cards check --repo <name>`, then report: verified, rewritten, retired,
    added, topics touched, with one line of reasoning each. Short enough to read in a minute.
 
 Never edit or regenerate `state.json`. A card that keeps its id keeps its review box; if a card's

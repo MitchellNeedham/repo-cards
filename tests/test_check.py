@@ -24,7 +24,7 @@ def checker(rc, repo, deck_factory):
 
 @pytest.fixture
 def good(card):
-    return card("alpha-is-one", anchor="src/mod.py#alpha",
+    return card("alpha-is-one", anchor="src/mod.py#alpha", level="orientation",
                 look={"src/mod.py#alpha": "the implementation",
                       "docs/adr-1.md": "the decision, and what it rejected"},
                 q="Why is alpha one, and what breaks if it is not?",
@@ -38,6 +38,38 @@ def levels(found, level):
 def test_a_good_card_is_clean(checker, good):
     _summary, found = checker([good])
     assert found == []
+
+
+class TestTheMixAndTheLength:
+    """What the deck asks of a newcomer, and how much of it it says at once."""
+
+    def test_an_unknown_level_is_an_error(self, checker, good):
+        _s, found = checker([{**good, "level": "advanced"}])
+        assert any("is not one of" in m for m in levels(found, "error"))
+
+    def test_a_deck_that_declares_no_level_is_warned_once(self, checker, good):
+        _s, found = checker([{k: v for k, v in good.items() if k != "level"}])
+        assert [m for m in levels(found, "warn") if "declares a `level`" in m]
+
+    def test_too_little_orientation_is_warned(self, checker, good):
+        cards = [{**good, "id": f"c{n}", "level": "deep"} for n in range(4)] + [good]
+        _s, found = checker(cards)
+        assert any("20% of cards are `orientation`" in m for m in levels(found, "warn"))
+
+    def test_half_orientation_passes(self, checker, good):
+        cards = [{**good, "id": f"c{n}", "level": "deep"} for n in range(2)]
+        cards += [{**good, "id": f"o{n}"} for n in range(2)]
+        _s, found = checker(cards)
+        assert not [m for m in levels(found, "warn") if "orientation" in m]
+
+    def test_an_answer_that_became_a_paragraph_is_warned(self, checker, good):
+        long_answer = "The ledger is authoritative and the projection is derived from it. " * 4
+        _s, found = checker([{**good, "a": long_answer}])
+        assert any("against a target of 100" in m for m in levels(found, "warn"))
+
+    def test_a_short_answer_is_not_warned(self, checker, good):
+        _s, found = checker([good])
+        assert not [m for m in levels(found, "warn") if "target of 100" in m]
 
 
 def test_duplicate_ids_are_an_error(checker, good):

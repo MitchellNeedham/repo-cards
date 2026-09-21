@@ -64,6 +64,13 @@ MAX_BOX = 5
 # the starvation cliff just above a 1.0 tier gap, so the gap here stays well clear of it.
 PRIORITY_WEIGHT = {1: 0.0, 2: 0.6, 3: 1.2}
 DEFAULT_PRIORITY = 2
+
+#: How hard a card is to answer, which is not how much it matters. A deck of nothing but
+#: `deep` is a deck nobody can get into: half of it should be answerable by somebody who
+#: has read the repo once and knows where things go.
+LEVELS = ("orientation", "working", "deep")
+DEFAULT_LEVEL = "working"
+ORIENTATION_FLOOR = 0.4     # below this share, the deck asks too much to be entered
 JITTER = 1.4
 RECENT_DAYS = 30        # a card added or rewritten this recently is still bedding in
 RECENT_BOOST = 0.6
@@ -537,6 +544,11 @@ def local_paths(card: dict, name: str) -> list[str]:
 def priority_of(card: dict) -> int:
     pri = card.get("priority", DEFAULT_PRIORITY)
     return pri if pri in PRIORITY_WEIGHT else DEFAULT_PRIORITY
+
+
+def level_of(card: dict) -> str:
+    lvl = str(card.get("level", "")).lower()
+    return lvl if lvl in LEVELS else DEFAULT_LEVEL
 
 
 def card_date(card: dict, deck: dict) -> dt.date | None:
@@ -2521,6 +2533,10 @@ def cmd_stats(args) -> int:
         print(f"  {C['dim']}★★★ {pri[1]} foundational · ★★ {pri[2]} core · ★ {pri[3]} detail"
               f"{f' · {recent} changed in the last {RECENT_DAYS}d' if recent else ''}{C['reset']}")
         print(f"  {C['dim']}{routed}/{len(cards)} carry a `look` route{C['reset']}")
+        if any(c.get("level") for c in cards):
+            lvl = collections.Counter(level_of(c) for c in cards)
+            print(f"  {C['dim']}" + " · ".join(f"{lvl[name]} {name}" for name in LEVELS)
+                  + f"{C['reset']}")
         counts, p90 = churn_context(entry, cards)
         hot = sorted(((churn_boost(c, counts, p90), c) for c in cards), key=lambda kv: -kv[0])[:3]
         if hot and hot[0][0] > 0:
@@ -2934,6 +2950,10 @@ KEBAB = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 #: symbols to name, so demanding one would teach the writer to invent them.
 PROSE = (".md", ".rst", ".txt", ".adoc")
 MAX_SENTENCES = 4
+#: The target is 100 characters: a card is one fact, and one fact fits on two lines. This is
+#: where an answer has stopped being a card and started being a paragraph, which is twice
+#: that and then some, so the warning stays worth reading.
+MAX_ANSWER = 200
 
 
 def check_deck(entry: dict, deck: dict, cards: list[dict]) -> list[tuple[str, str, str]]:
@@ -2951,6 +2971,17 @@ def check_deck(entry: dict, deck: dict, cards: list[dict]) -> list[tuple[str, st
     for field in ("last_update_sha", "last_update_date"):
         if not deck.get(field):
             warn("deck", f"no `{field}`, so drift has no baseline to measure from")
+
+    # A deck is entered before it is mastered. One that asks only hard questions is one
+    # nobody gets into, so the mix is checked as well as the cards.
+    if cards and not any(c.get("level") for c in cards):
+        warn("deck", "no card declares a `level`, so nothing says how much of this deck a "
+                     "newcomer to the repo could answer")
+    elif cards:
+        share = sum(1 for c in cards if level_of(c) == "orientation") / len(cards)
+        if share < ORIENTATION_FLOOR:
+            warn("deck", f"only {round(100 * share)}% of cards are `orientation`, against a "
+                         f"target of about half")
 
     seen: dict[str, int] = {}
     for n, card in enumerate(cards, 1):
@@ -2979,6 +3010,11 @@ def check_deck(entry: dict, deck: dict, cards: list[dict]) -> list[tuple[str, st
             warn(scope, f"question can be answered yes or no, so it tests recognition: {q[:60]!r}")
         if a and len(SENTENCE_END.findall(a)) > MAX_SENTENCES:
             warn(scope, f"answer runs to more than {MAX_SENTENCES} sentences, so it is two cards or a document")
+        if len(a) > MAX_ANSWER:
+            warn(scope, f"answer is {len(a)} characters, against a target of 100. Cut it to the "
+                        f"fact, or split it")
+        if card.get("level") is not None and str(card["level"]).lower() not in LEVELS:
+            err(scope, f"level {card['level']!r} is not one of {', '.join(LEVELS)}")
 
         kind = str(card.get("kind") or "recall").lower()
         if kind not in ("recall", "cloze", "locate", "order"):

@@ -25,7 +25,10 @@ Then:
    or decision register. That is where the load-bearing knowledge already is. Only derive it from
    code and `git log` when no such record exists.
 4. Draft the cards against the skill's bar, grouped by theme with `# ---` section comments. Aim for
-   60 to 80, and say so before exceeding that.
+   60 to 80, and say so before exceeding that. **Write the orientation half first**: about half the
+   deck should be plain questions about where things go, what the parts are called and which
+   component owns what, marked `level: orientation`. Keep answers under 100 characters where the
+   fact allows it.
 5. Propose four to eight topics in the same pass, including an `orientation` topic.
 6. Set `repo`, `description`, `last_update_sha` (current short HEAD) and `last_update_date`. Do not
    put the repo root in the deck; that lives in the registry.

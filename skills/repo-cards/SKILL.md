@@ -87,6 +87,19 @@ A card earns its place when the answer is: I would write a defect, reopen a deci
 already settled with reasons, or lose an hour to something nobody wrote down. Everything else is
 recognition-level knowledge that belongs in a document, not a deck.
 
+**About half the deck should be easy.** The cost test says which facts are worth knowing, not how
+hard they should be to answer, and a deck of nothing but deep mechanics is one nobody can get into.
+Aim for roughly half `orientation` cards: where a new component goes, what the layers are called,
+which side of a boundary owns what, what the repo's own words mean. They are plain questions with
+plain answers, and they are what makes a deck usable on the first day back after six months.
+
+**Prefer the general question to the specific one.** "Where does a background job live, and what
+else has to change when you add one" beats "what does `enqueue_retry` default its backoff to". The
+first is the shape of the codebase and survives a refactor; the second is a fact about one function
+that a reader can look up and that rots the next time somebody touches it. A card that is hard to
+answer and teaches little about how the repo is put together is the worst card in a deck: keep it
+only if being wrong about it is genuinely expensive.
+
 **Include:**
 
 * **Invariants.** Rules where a violation is a defect rather than a preference.
@@ -107,7 +120,9 @@ recognition-level knowledge that belongs in a document, not a deck.
 
 **Exclude:**
 
-* Anything a `grep` answers in ten seconds: file locations, function signatures, command flags.
+* Anything a `grep` answers in ten seconds: the line a symbol is on, a signature, a flag's
+  spelling. A *convention* about where a kind of thing goes is not this: `grep` cannot tell you
+  where the next one should be put.
 * API surface listings, directory trees, dependency lists.
 * Anything that changes under ordinary refactoring. That is guaranteed rot for no benefit.
 * Facts with no consequence. "There are five Django apps" is trivia; "services never speak HTTP,
@@ -126,6 +141,7 @@ sessions rather than demanding to be finished.
 - id: outbox-row-is-a-prompt          # stable kebab-case slug; state.json keys on it
   tags: [outbox, invariant]           # lowercase; --tag filters on these
   priority: 1                         # 1 foundational, 2 core (default, omit it), 3 detail
+  level: deep                         # orientation, working (default, omit it), deep
   anchor: src/billing/outbox.py#enqueue   # where the fact is DEFINED. One path, drift-tracked
   verified: 4f2a91c                      # the commit this card was last checked against
   look:                               # how you would go and check. Path: what you would find
@@ -135,9 +151,15 @@ sessions rather than demanding to be finished.
   q: >-
     ADR-7: enqueue writes an empty payload. Why is the outbox row blank, and what does that make it?
   a: >-
-    It makes the message a prompt, not a snapshot. The row says this invoice changed; the bytes are
-    rendered at send time from the invoice as it is then, so a queued payload would go out stale.
+    A prompt, not a snapshot: the bytes are rendered at send time, so a queued payload would be
+    stale.
 ```
+
+**Keep the answer under 100 characters where the fact allows it.** One card is one fact, and one
+fact fits on two lines. A long answer is usually two cards, or a card with its reasoning pasted in:
+the reasoning belongs in the repo, and `look` is how the reader gets to it. `check` warns past 200,
+which is the point where an answer has stopped being a card, but 200 is the ceiling and 100 is the
+target. Cut qualifiers, not content: if the shorter version is no longer true, it was two cards.
 
 ### priority
 
@@ -156,6 +178,19 @@ A card anchored on a file being edited weekly is knowledge at risk; one anchored
 nobody has touched in three years is settled. There is no field for this and nothing to maintain,
 but it is a reason to **anchor on the file that actually changes** rather than a stable summary of
 it.
+
+### level
+
+How hard the card is to answer, which is not how much it matters. `priority` says what a short
+session should reach first; `level` says who can answer it.
+
+**orientation**: answerable by somebody who has read the repo once and paid attention. Layout,
+naming, which component owns what, the vocabulary. **Aim for about half the deck.** `check` warns
+below 40%. **working** (the default, so omit it): needs the area, not just the tour. **deep**: the
+invariant nobody guesses, the decision with an argument behind it, the trap.
+
+A deck with no `orientation` cards is a deck that only its author can use. Write the easy half
+deliberately rather than hoping it falls out of the hard half.
 
 ### kind
 
@@ -295,7 +330,10 @@ feature spans tags or when the order matters.
    decisions register has done most of the work for you.
 4. For a repo with no such record, derive it: the invariants are implicit in what the tests assert
    and what the code comments defend, and `git log` shows what has been fixed twice.
-5. Draft cards against the bar above. Group by theme with `# ---` section comments.
+5. Draft cards against the bar above. Group by theme with `# ---` section comments. **Write the
+   orientation half first**: where things go, what the parts are called, which component owns what.
+   They are quick to write, they are what makes the deck usable, and drafting them first stops the
+   deck filling up with deep mechanics and then having easy cards bolted on.
 6. Write the deck to `<data home>/<name>/deck.yaml` with `repo`, `description`,
    `last_update_sha` (current short HEAD) and `last_update_date`. Do **not** put the repo root in
    the deck: that is machine-specific and lives in the registry.
@@ -304,8 +342,10 @@ feature spans tags or when the order matters.
 8. **Validate with `repo-cards check --repo <name>` and fix what it reports.** It enforces what
    this file describes: duplicate ids, missing fields, topic ids that resolve to nothing, routes
    and notes files that do not exist, cross-repo refs naming an unregistered repo, cloze cards with
-   no blanks. It also warns where the deck misses its own bar: anchors with no `#symbol`, questions
-   answerable yes or no, answers longer than four sentences, cards with fewer than two routes.
+   no blanks, a `level` that is not one of the three. It also warns where the deck misses its own
+   bar: anchors with no `#symbol`, questions answerable yes or no, answers longer than four
+   sentences or 200 characters, cards with fewer than two routes, and a deck with too few
+   `orientation` cards to be entered.
    Errors are defects and must be fixed. Warnings are judgement, so fix the ones that are right and
    say why you are keeping the rest.
 9. Report the card count, the tag breakdown and the topics, and name anything deliberately left
@@ -333,29 +373,34 @@ Then, in order:
    recognised rather than answered. Split it or rewrite the question. Keep the id if the fact is
    the same one; give it a new id if you have genuinely changed what is being asked, so its
    history does not flatter the new card.
-3. **Verify before adding.** For every card the drift report flags hot, read the anchor as it is
+3. **Bring the deck towards the bar as you pass through it.** `check` reports answers past 200
+   characters and a deck short of `orientation` cards. Shorten the long answers of any card you
+   touch, towards the 100-character target, and add the missing easy cards for the area you are
+   already reading. Do not rewrite a whole deck in one pass: cards you did not touch keep what
+   they had, which is what makes a partial update honest.
+4. **Verify before adding.** For every card the drift report flags hot, read the anchor as it is
    *now* and decide: still true (leave it, id included), now wrong (rewrite the answer, keep the id
    so the box survives), or no longer a fact (retire it).
    **This step is the point of the update.** A deck that only grows is a deck that quietly starts
    lying.
-4. **Read the commit messages, not just the diff.** A commit like "Drop RabbitMQ, which nobody can
+5. **Read the commit messages, not just the diff.** A commit like "Drop RabbitMQ, which nobody can
    say what was wrong with" is a decision with reasoning, which is exactly what a card is for. A
    decision *reversed* is the highest-value card in an update, and the old card must be retired in
    the same pass.
-5. **Then consider new cards** from the uncovered-files list, against the same bar. Most changed
+6. **Then consider new cards** from the uncovered-files list, against the same bar. Most changed
    files warrant no card.
-6. **Fix the routes.** `drift` reports two things beside the anchors: cards whose `look` route
+7. **Fix the routes.** `drift` reports two things beside the anchors: cards whose `look` route
    changed, where the fact is probably intact but the directions moved, and **paths that no longer
    exist**, which are defects and should be repaired in every pass.
-7. **Fix the topics.** A retired card leaves a dangling id, which `repo-cards topics` flags; a new
+8. **Fix the topics.** A retired card leaves a dangling id, which `repo-cards topics` flags; a new
    card usually belongs in an existing topic, and a genuinely new feature area may want its own.
-8. **Stamp what changed, and what you checked.** A rewritten card gets `updated: <today>`; a new
+9. **Stamp what changed, and what you checked.** A rewritten card gets `updated: <today>`; a new
    one gets `added: <today>`. That is the only record of recency, since the deck is not in git, and
    it is what floats new material to the front of a session. **Every card you read in this pass
    also gets `verified: <short HEAD>`**, whether or not you changed it, so the next update measures
    it from here instead of from the deck's baseline.
-9. Bump `last_update_sha` and `last_update_date`.
-10. Re-validate with `repo-cards check --repo <name>` and report: verified, rewritten, retired,
+10. Bump `last_update_sha` and `last_update_date`.
+11. Re-validate with `repo-cards check --repo <name>` and report: verified, rewritten, retired,
    added, topics touched, one line of reasoning each. Short enough to read in a minute.
 
 `drift` decides this for you rather than leaving it to judgement: past roughly 60 commits, or once
